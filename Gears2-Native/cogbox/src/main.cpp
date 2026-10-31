@@ -9,6 +9,7 @@
 #include "update.h"
 #include "report.h"
 #include "imgui_impl_sdl3.h"
+extern int g_lastKeyScancode;   // page.cpp
 #include "imgui_impl_sdlrenderer3.h"
 #include "imgui_internal.h"
 #include "../third_party/miniz/miniz.h"
@@ -115,6 +116,15 @@ static void answered(App &a)
         a.ini.set("Notices", "TitleUpdatesSeen", COGBOX_VERSION);
         a.ini.save();
     }
+    else if (m.tag == "reportexp") {   // Shagg 31 Oct: the About tab report, after the experimental-settings prompt
+        if (m.checked) { a.ini.seti("Notices", "ReportExperimentalNever", 1); a.ini.save(); }
+        if (m.answer == 0) report_now(a, m.game, m.data);
+    }
+    else if (m.tag == "expnotice") {   // Shagg 31 Oct: experimental settings are for testing, not for regular play
+        if (m.checked) a.ini.seti("Notices", "ExperimentalNever", 1);
+        a.ini.set("Notices", "ExperimentalSeen", COGBOX_VERSION);
+        a.ini.save();
+    }
     else if (m.tag == "turec") {   // 0.2.0: Gears 2 / 3 without Title Update 6
         if (m.checked && g >= 0) { a.ini.seti("Notices", std::string("TuRecommendNever_") + game_def(g).key, 1); a.ini.save(); }
     }
@@ -162,6 +172,16 @@ void startup_notices(App &a)
             "    Gears of War - Title Update 5 (required)\n    Gears of War 2 - Title Update 6\n    Gears of War 3 - Title Update 6\n    Gears of War: Judgment - Title Update 4 (required for now)\n\n"
             "They give the best compatibility and performance. Add each one from your own console (ADD UPDATE, or the game's "
             "About tab) - COGBox doesn't include game or update files.", { "Continue" });
+        a.modal.check = "Don't show this again";
+        return;
+    }
+    if (!a.ini.geti("Notices", "ExperimentalNever", 0) && a.ini.get("Notices", "ExperimentalSeen") != COGBOX_VERSION) {
+        ask(a, "expnotice", -1, "Experimental settings",
+            "Settings marked experimental (Vulkan, FSR / DLSS / XeSS, frame generation and others) "
+            "are there for testing and debugging. They are not meant for regular play yet: they can be slow, look wrong "
+            "or crash.\n\n"
+            "Before you send a report, please turn every experimental setting off and try again - unless the report is "
+            "about one of those settings.", { "Continue" });
         a.modal.check = "Don't show this again";
     }
 }
@@ -557,6 +577,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) refresh_pads(a);
             // 0.2.0: the hints follow the device used last (stick movement past half way counts, small drift doesn't)
             if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e.gaxis.value) > 16000)) a.lastPad = true;
+            if (e.type == SDL_EVENT_KEY_DOWN) g_lastKeyScancode = (int)e.key.scancode;   // the key's position (page.cpp key capture)
             if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL) a.lastPad = false;
             if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) a.dropped.push_back(e.drop.data);
             if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && !a.run.proc) { refresh_games(a, false); covers_load(a); }

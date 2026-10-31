@@ -18,6 +18,7 @@ include(cmake/rexglue.cmake)
 add_library(gn_layer0_xenos STATIC
     src/layer0_xenos/crash_report.cpp
     src/layer0_xenos/system_report.cpp
+    src/layer0_xenos/save_watch.cpp
     src/layer0_xenos/cpu_check.cpp
     src/layer0_xenos/latency_reflex.cpp
     src/layer0_xenos/renderer/frame_generation.cpp

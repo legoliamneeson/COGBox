@@ -17,6 +17,23 @@
 
 // ---- the PC, for the settings ---------------------------------------------------------------------------------------
 // Searching a 100 MB exe for a word takes a moment, so each (file, word) answer is kept.
+// Shagg 31 Oct: the About tab's HELP US TEST list - what this release needs players to confirm. Update it with every
+// release (games: bit per GameId - 1 Gears 2, 2 Gears 3, 4 Judgment, 8 Gears 1; 15 = all).
+struct HelpTest { unsigned games; const char *text; };
+static const HelpTest k_helpTest[] = {
+    { 2,  "Sudden death / \"cursed\" save, or a teammate killing you (#55, #68, #79, #80): if it happens to you, play to a checkpoint, save and quit, resume and play on until it happens, then send a problem report (and your saves from before and after, if you can). This version logs every save file the game writes, so your report shows what went wrong." },
+    { 2,  "Raam's Shadow DLC not found (#79): if the game sometimes needs a restart or two before it sees the DLC, send a problem report from a start where it didn't." },
+    { 15, "Other versions of the game (regional discs, other title updates): if yours isn't the one COGBox expects, tell us whether it works." },
+};
+
+// Shagg 31 Oct: the About tab's problem report (also after the experimental-settings prompt, main.cpp "reportexp")
+void report_now(App &a, int g, const std::string &session)
+{
+    std::string zip, err;
+    if (make_report(a, g, session, "", zip, err)) { set_message(a, std::string(a.wine ? "Saved in COGBox's reports folder: " : "Saved on your desktop: ") + zip.substr(zip.find_last_of('\\') + 1), false); if (a.wine) shell_open(zip.substr(0, zip.find_last_of('\\'))); }
+    else set_message(a, "Couldn't make the report: " + err, true);
+}
+
 static bool file_has(const std::string &path, const std::string &needle)
 {
     static std::map<std::string, bool> cache;
@@ -205,6 +222,26 @@ static const char *sdk_key_name(ImGuiKey k)
     }
 }
 
+// The game's keyboard driver (rexglue ui/sdl_virtual_key.cpp) identifies keys by SDL scancode, i.e. by their position on
+// a US layout, while Dear ImGui names them by the character they type (SDL keycode). On AZERTY / QWERTZ / other layouts
+// those differ (AZERTY "A" is the US "Q" position, QWERTZ Y/Z swap, AZERTY ";" sits at the US "," position), so the
+// pressed key is named here from its scancode, the same way the driver will see it.
+int g_lastKeyScancode = 0;
+static const char *sdk_scancode_name(int sc)
+{
+    static char one[2];
+    if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) { one[0] = char('A' + (sc - SDL_SCANCODE_A)); one[1] = 0; return one; }
+    if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9) { one[0] = char('1' + (sc - SDL_SCANCODE_1)); one[1] = 0; return one; }
+    switch (sc) {
+    case SDL_SCANCODE_0: return "0";
+    case SDL_SCANCODE_SEMICOLON: return "Semicolon"; case SDL_SCANCODE_EQUALS: return "Plus"; case SDL_SCANCODE_COMMA: return "Comma";
+    case SDL_SCANCODE_MINUS: return "Minus"; case SDL_SCANCODE_PERIOD: return "Period"; case SDL_SCANCODE_SLASH: return "Slash";
+    case SDL_SCANCODE_GRAVE: return "Backtick"; case SDL_SCANCODE_LEFTBRACKET: return "LBracket"; case SDL_SCANCODE_BACKSLASH: return "Backslash";
+    case SDL_SCANCODE_RIGHTBRACKET: return "RBracket"; case SDL_SCANCODE_APOSTROPHE: return "Quote";
+    default: return nullptr;   // everything else: ImGui's name already matches the driver's
+    }
+}
+
 static std::string key_shown(const std::string &v)   // "MMB,Z" -> "Middle mouse / Z"
 {
     std::string out, tok;
@@ -304,6 +341,8 @@ static void keys_section(App &a)
         else if (ImGui::IsMouseClicked(2)) name = "MMB";
         for (int k = ImGuiKey_NamedKey_BEGIN; !name && k < ImGuiKey_NamedKey_END; k++)
             if (ImGui::IsKeyPressed((ImGuiKey)k, false)) name = sdk_key_name((ImGuiKey)k);
+        if (name && strcmp(name, "LMB") && strcmp(name, "RMB") && strcmp(name, "MMB"))
+            if (const char *pos = sdk_scancode_name(g_lastKeyScancode)) name = pos;   // by position, as the driver sees it
         if (name) {
             // Players reported mixed-up binds: one key bound to two actions pressed both. A key now belongs to one action:
             // taken from any other action that had it (an action left with no key says so). WASD and the arrows move and
@@ -787,17 +826,35 @@ static void about_tab(App &a, int g)
     }
 
     ImGui::Dummy(ImVec2(0, S(8)));
+    // Shagg 31 Oct: what this release needs players to test - kept with each update (k_helpTest, top of this file)
+    {
+        bool any = false;
+        for (const HelpTest &h : k_helpTest) if (h.games & (1u << g)) { any = true; break; }
+        if (any) {
+            th_heading("HELP US TEST", g_rowX1);
+            row_desc("We're still tracking these down and need players' help. If one of them happens to you, please tell us in "
+                     "its GitHub issue - a problem report (below) helps a lot.");
+            for (const HelpTest &h : k_helpTest) if (h.games & (1u << g)) row_desc(std::string("  -  ") + h.text);
+            if (small_button("Open the issues on GitHub")) shell_open("https://github.com/Shagg88/COGBox/issues");
+            ImGui::Dummy(ImVec2(0, S(8)));
+        }
+    }
     th_heading("PROBLEMS", g_rowX1);
     row_desc("A problem report is one zip on your desktop with the last play's log, the settings and a description of this PC "
              "(no saves, no game files; your Windows user name is taken out). Nothing is sent - attach it to a GitHub issue.");
     if (small_button("Make a problem report")) {
         std::string s = newest_session(g);
         if (s.empty()) set_message(a, std::string("No play of ") + d.name + " yet - play once, then make the report.", false);
-        else {
-            std::string zip, err;
-            if (make_report(a, g, s, "", zip, err)) { set_message(a, std::string(a.wine ? "Saved in COGBox's reports folder: " : "Saved on your desktop: ") + zip.substr(zip.find_last_of('\\') + 1), false); if (a.wine) shell_open(zip.substr(0, zip.find_last_of('\\'))); }
-            else set_message(a, "Couldn't make the report: " + err, true);
-        }
+        else if (!a.ini.geti("Notices", "ReportExperimentalNever", 0)) {   // Shagg 31 Oct: experimental settings off first
+            ask(a, "reportexp", g, "Before you make the report",
+                "Experimental settings (Vulkan, FSR / DLSS / XeSS, frame generation and others) are for "
+                "testing, not for regular play - for the smoothest play, use settings that aren't marked experimental.\n\n"
+                "Please turn every experimental setting off, play again and then make the report - unless the report is "
+                "about one of those settings. The report lists the experimental settings that were on.",
+                { "Make the report", "Cancel" });
+            a.modal.check = "Don't show this again";
+            a.modal.data = s;
+        } else report_now(a, g, s);
     }
     ImGui::SameLine();
     if (small_button("Reset settings to defaults...")) ask(a, "reset", g, "Reset to defaults", "Put every setting of every game back to its default? Your saves are not touched.", { "Reset", "Cancel" });

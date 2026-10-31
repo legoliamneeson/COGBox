@@ -74,6 +74,14 @@ REXCVAR_DEFINE_BOOL(ue3_mouse_look, false, "COGBox",
                     "dead zone, cap or acceleration). Off: the mouse drives the right stick");
 REXCVAR_DEFINE_DOUBLE(ue3_mouse_scale, 1.0, "COGBox", "Native mouse look: multiplier on the mouse counts")
     .range(0.01, 20.0);
+// GitHub #52: UE3's PlayerInput multiplies the mouse axes by FOVScale (FOVAngle / 90), so a wider camera turns faster
+// per count. The launcher's Field of view (%) widens every camera by that factor (GearCamera.ini FOVAngle*=k), so the
+// mouse got faster with it. This divides that factor out again: the launcher sends 100 / FOV %. If the ultrawide
+// patch turns out to change FOVAngle too, multiply its factor in here. 1 = as before. Zoom / roadie-run FOV changes by the
+// game itself keep the console's scaling (aiming zoomed is meant to be slower).
+REXCVAR_DEFINE_DOUBLE(ue3_mouse_fov_comp, 1.0, "COGBox",
+                      "Native mouse look: multiplier that undoes the launcher's FOV / ultrawide widening (GitHub #52)")
+    .range(0.25, 4.0);
 REXCVAR_DEFINE_BOOL(ue3_mouse_invert_y, false, "COGBox", "Native mouse look: invert up / down");
 REXCVAR_DEFINE_BOOL(ue3_mouse_aim_assist, false, "COGBox",
                     "Native mouse look (Gears 2): keep the aim friction for the mouse too");
@@ -162,7 +170,7 @@ inline bool Take(double* x, double* y) {
   double dx, dy;
   Drain(&dx, &dy);
   if (dx == 0 && dy == 0) return false;
-  const double s = REXCVAR_GET(ue3_mouse_scale);
+  const double s = REXCVAR_GET(ue3_mouse_scale) * REXCVAR_GET(ue3_mouse_fov_comp);  // GitHub #52
   *x = dx * s;
   *y = -dy * s;
   if (REXCVAR_GET(ue3_mouse_invert_y)) *y = -*y;

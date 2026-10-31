@@ -138,14 +138,31 @@ void TickTimeline() {  // the game thread is the only caller
 // runs, the engine's limit is held at --gowj_loading_fps (60): from the moment the game opens its loading movie
 // (GearGame\Movies\LoadingMovie*.bik) until 6 s after the last level package (.xxx) it opened, at least 10 s. Then
 // the player's own limit comes back. Gameplay itself is unchanged; only the loading screen's own rate is lowered.
-REXCVAR_DEFINE_INT32(gowj_loading_fps, 60, "Judgment",
+// GitHub #77 / #54: 30 by default (the launcher already sends 30; #54's 30 fps run loads cleanly). The window used to
+// be stretched by every .xxx opened, and Judgment streams level packages during play, so the cap could stay on for
+// good ("locked at 30", #77). Now: (1) a real loading flag, when a hook reports it (GowjSetLoadingState), decides
+// alone - cap while loading, release on the first tick it is clear; (2) without one, streamed packages extend the
+// window by at most --gowj_loading_stream_s past the last level package / loading movie; (3) --gowj_loading_max_s
+// ends any loading cap, logged, whatever the signals say.
+REXCVAR_DEFINE_INT32(gowj_loading_fps, 30, "Judgment",
                      "GitHub #38: the engine's frame-rate limit while a loading screen runs (0 = no change). Above it a "
                      "loading screen can stay up for ever (the end of Monroe Commons at 162 fps)");
+REXCVAR_DEFINE_INT32(gowj_loading_max_s, 90, "Judgment",
+                     "GitHub #77: a loading-screen cap ends after this many seconds whatever the loading signals say (0 = never)");
+REXCVAR_DEFINE_INT32(gowj_loading_stream_s, 20, "Judgment",
+                     "GitHub #77: streamed level packages (.xxx that are not *_P.xxx) keep the cap on for at most this many "
+                     "seconds after the last level package / loading movie");
 
 namespace {
 using LoadClock = std::chrono::steady_clock;
 std::atomic<int64_t> g_load_start{0};     // steady_clock ticks of the loading movie's open; 0 = no loading screen
 std::atomic<int64_t> g_load_last_pkg{0};  // the last .xxx opened since then
+std::atomic<int64_t> g_load_last_trigger{0};  // the last loading movie / *_P.xxx (a real level change)
+std::atomic<int64_t> g_load_watchdog{0};      // the last "still loading" line
+// GitHub #77: the engine's own loading state when a hook reports it: -1 = no hook (file-open heuristic), 0 = not
+// loading, 1 = loading. Hook candidates (addresses to be found in this build): GIsLoading / UGameEngine::LoadMap entry
+// and exit, FFullScreenMovie::GameThreadIsMoviePlaying("LoadingMovie").
+std::atomic<int> g_load_flag{-1};
 
 bool EndsWithNoCase(std::string_view s, std::string_view tail) {
   if (s.size() < tail.size()) return false;
@@ -167,27 +184,69 @@ void OnGowjFileOpened(std::string_view guest_path, const std::filesystem::path*)
   // the first ran at the player's limit (162 fps) and the one after Monroe Commons hung again. A level's persistent
   // package (*_P.xxx) is opened by every level change, so it starts the clamp too.
   if ((EndsWithNoCase(guest_path, ".bik") && ContainsNoCase(guest_path, "loadingmovie")) || EndsWithNoCase(guest_path, "_p.xxx")) {
-    if (g_load_start.exchange(now) == 0) REXLOG_INFO("gowj_loading_fps: loading screen - engine limit {} fps", REXCVAR_GET(gowj_loading_fps));
+    if (g_load_start.exchange(now) == 0)
+      REXLOG_INFO("gowj_loading_fps: cap on - loading screen ({}), engine limit {} fps", guest_path, REXCVAR_GET(gowj_loading_fps));
     g_load_last_pkg.store(now);
+    g_load_last_trigger.store(now);
   } else if (g_load_start.load() != 0 && EndsWithNoCase(guest_path, ".xxx")) {
     g_load_last_pkg.store(now);
   }
 }
-bool LoadingClampActive() {
-  const int64_t start = g_load_start.load();
-  if (start == 0) return false;
-  using namespace std::chrono;
-  const auto now = LoadClock::now().time_since_epoch();
-  const auto since_start = now - LoadClock::duration(start);
-  const auto since_pkg = now - LoadClock::duration(g_load_last_pkg.load());
-  if (since_start < seconds(10) || since_pkg < seconds(6)) return true;
+void ReleaseLoadingClamp(int64_t start, const char* why, std::chrono::steady_clock::duration since_start) {
   int64_t expected = start;
   if (g_load_start.compare_exchange_strong(expected, 0))
-    REXLOG_INFO("gowj_loading_fps: loading screen over after {:.1f} s - the player's own limit again",
-                duration<double>(since_start).count());
-  return false;
+    REXLOG_INFO("gowj_loading_fps: cap off - {} after {:.1f} s, the player's own limit again", why,
+                std::chrono::duration<double>(since_start).count());
+}
+bool LoadingClampActive() {
+  using namespace std::chrono;
+  const int flag = g_load_flag.load(std::memory_order_relaxed);
+  const int64_t now_ticks = LoadClock::now().time_since_epoch().count();
+  if (flag == 1) {  // the engine says it is loading: make sure the cap is on (also for loads no file open announced)
+    int64_t zero = 0;
+    if (g_load_start.compare_exchange_strong(zero, now_ticks)) {
+      g_load_last_trigger.store(now_ticks);
+      REXLOG_INFO("gowj_loading_fps: cap on - engine loading flag, engine limit {} fps", REXCVAR_GET(gowj_loading_fps));
+    }
+  }
+  const int64_t start = g_load_start.load();
+  if (start == 0) return false;
+  const auto now = LoadClock::duration(now_ticks);
+  const auto since_start = now - LoadClock::duration(start);
+  const int32_t max_s = REXCVAR_GET(gowj_loading_max_s);
+  if (max_s > 0 && since_start >= seconds(max_s)) {  // hard stop: a cap that never ends is #77
+    ReleaseLoadingClamp(start, "timeout (--gowj_loading_max_s)", since_start);
+    return false;
+  }
+  if (flag == 0) {  // a real flag decides alone: the first tick it is clear ends the cap
+    ReleaseLoadingClamp(start, "engine loading flag clear", since_start);
+    return false;
+  }
+  bool on = flag == 1;
+  if (!on) {  // no hook: the file-open window, streamed packages capped at gowj_loading_stream_s past the last trigger
+    const auto since_pkg = now - LoadClock::duration(g_load_last_pkg.load());
+    const auto since_trigger = now - LoadClock::duration(g_load_last_trigger.load());
+    const bool streaming = since_pkg < seconds(6) && since_trigger < seconds(std::max(6, REXCVAR_GET(gowj_loading_stream_s)));
+    on = since_start < seconds(10) || since_trigger < seconds(6) || streaming;
+  }
+  if (!on) {
+    ReleaseLoadingClamp(start, "loading screen over", since_start);
+    return false;
+  }
+  // every 10 s: say it is still on, so a report shows a load that does not end (#54) and why the cap stays
+  int64_t last = g_load_watchdog.load(std::memory_order_relaxed);
+  if (now - LoadClock::duration(std::max(last, start)) >= seconds(10) && g_load_watchdog.compare_exchange_strong(last, now_ticks))
+    REXLOG_INFO("gowj_loading_fps: still loading after {:.0f} s (flag {}, last package {:.1f} s ago, last trigger {:.1f} s ago)",
+                duration<double>(since_start).count(), flag,
+                duration<double>(now - LoadClock::duration(g_load_last_pkg.load())).count(),
+                duration<double>(now - LoadClock::duration(g_load_last_trigger.load())).count());
+  return true;
 }
 }  // namespace
+
+// GitHub #77: for a hook on the engine's own loading state (see g_load_flag). Once called, the file-open heuristic is
+// no longer used for the release.
+void GowjSetLoadingState(bool loading) { g_load_flag.store(loading ? 1 : 0, std::memory_order_relaxed); }
 
 void Ue3ShaderPrebuildChainFileOpened(void (*listener)(std::string_view, const std::filesystem::path*));  // shader_prebuild.cpp
 
@@ -205,7 +264,24 @@ void GowjInstallLoadingClamp() {
 void GowjMaxTickRate(PPCRegister& f1) {  // after `lfs f1,0x4CC(r3)` at 0x8255E220: f1 = the engine's limit (fps)
   TickTimeline();
   const int32_t cap = REXCVAR_GET(gowj_loading_fps);
-  if (cap > 0 && LoadingClampActive() && (f1.f64 <= 0.0 || f1.f64 > double(cap))) f1.f64 = double(cap);
+  // GitHub #77 (report 20261031-105629): every change of the engine's own limit is logged, so a report names it.
+  static std::atomic<int32_t> s_last_engine{-1000};
+  const int32_t engine = int32_t(f1.f64 + 0.5);
+  if (const int32_t was = s_last_engine.exchange(engine); was != engine && was != -1000)
+    REXLOG_INFO("gowj_max_fps: engine limit {} -> {} fps", was, engine);
+  if (cap > 0 && LoadingClampActive()) {
+    if (f1.f64 <= 0.0 || f1.f64 > double(cap)) f1.f64 = double(cap);
+    return;
+  }
+  // GitHub #77: outside a loading screen the game may lower its own limit (30) and keep it; the player's limit wins.
+  const int32_t want = REXCVAR_GET(gowj_max_fps);
+  if (want != 0 && f1.f64 > 0.0 && f1.f64 < (want < 0 ? 1000.0 : double(want)) - 0.5) {
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+      REXLOG_INFO("gowj_max_fps: the game lowered its limit to {:.0f} fps outside a loading screen - held at {} (GitHub #77)",
+                  f1.f64, want < 0 ? 1000 : want);
+    f1.f64 = want < 0 ? 0.0 : double(want);
+  }
 }
 
 // ---- Engine settings through the game's own config (layer 2 --ue3_ini_edits) ----------------------------------------
@@ -437,6 +513,22 @@ void GowjQueryPollYield() {
     default:
       break;
   }
+#ifdef _WIN32
+  // GitHub #54 (report e8a6e675): each sleep already ends after 1 ms, but the loop itself can wait on a query whose
+  // answer never comes (a strict query the GPU never completes while the loading movie plays). Say so once per wait
+  // after 2 s, with the loading state, so a report shows it. Answering such a query "visible" belongs in the
+  // renderer's strict path (DeferredReports), not here.
+  thread_local uint64_t wait_start = 0, wait_last = 0;
+  thread_local bool wait_logged = false;
+  const uint64_t q = QpcNow(), f = QpcFrequency();
+  if (q - wait_last > f / 5000) { wait_start = q; wait_logged = false; }  // same 200 us rule as WaitStreak
+  wait_last = q;
+  if (!wait_logged && q - wait_start > 2 * f) {
+    wait_logged = true;
+    REXLOG_WARN("gowj_patch_query_poll_yield: one GPU query wait has lasted over 2 s (loading cap {})",
+                g_load_start.load() != 0 ? "on" : "off");
+  }
+#endif
 }
 
 bool GowjGpuWaitStep() {  // jump_address_on_true: skip the empty delay loop to the cctpm
