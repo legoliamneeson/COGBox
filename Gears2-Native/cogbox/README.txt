@@ -75,6 +75,25 @@ Keyboard and mouse: every key can be changed on a game's Controls tab.
 DLC and mods: a game's About tab (Downloadable content, Mods).
 
 
+System Link - LAN play (experimental, Gears of War 2 for now)
+-------------------------------------------------------------
+Play the game's System Link modes (co-op, Horde, versus) with other PCs on your network. Thanks to
+HubertFer, whose patch made this possible.
+1. Every PC needs COGBox 0.3.5 or newer and its own copy of the game.
+2. Put the PCs on the same network - the same home router, or a LAN VPN such as Radmin VPN,
+   ZeroTier or Hamachi for friends far away. Internet VPNs such as NordVPN do not link PCs: turn
+   them off while you play.
+3. On each PC: Gears of War 2 > Settings > Gameplay > tick "System Link - LAN play".
+4. Start the game. On one PC host (for co-op: Campaign > Co-op > Host, then set the party to
+   System Link). On the other PC choose Join (System Link) and pick that game.
+5. If Windows asks about the firewall, allow Private networks.
+6. Co-op: the joining player presses RT ("Press RT to begin") to take over Dom.
+If the other PC's game is not listed (some VPNs drop the "find games" messages), add the other PC's
+address on its own line in extra-args.txt in the COGBox folder (make the file if it isn't
+there), for example: --net_peer_ip=26.10.20.30
+Not yet: voice chat; hosting from Linux / Steam Deck (joining should work). With the box off the
+game works exactly as before. Please tell us how it goes in GitHub issue #72.
+
 Linux and Steam Deck (Proton) - experimental
 ---------------------------------------------
 1. Unzip COGBox somewhere in your home folder.

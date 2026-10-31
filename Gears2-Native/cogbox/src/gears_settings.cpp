@@ -302,6 +302,13 @@ std::vector<Option> make_options(Game g) {
                "release.", 324), "version");
     add(choice("Players", "Players", Tab::Gameplay, PG, { "1", "2 (split-screen)", "3 (split-screen)", "4 (split-screen)" }, 0,
                "Local split-screen co-op (one controller each).", 325), "players");
+    // 0.3.5 (GitHub #72, SDK patch 49b): System Link over a LAN or a LAN VPN (Radmin VPN, ZeroTier, Hamachi). Off = the
+    // runtime behaves exactly as before ("No Network Connection").
+    add(make("SystemLink", "System Link - LAN play (experimental)", Tab::Gameplay, Kind::Bool, PG, 0,
+             "Experimental - lets the game's System Link find and join games on other PCs on your network (or on a LAN VPN "
+             "such as Radmin VPN, ZeroTier or Hamachi; not internet VPNs like NordVPN). Gears 2 first: co-op worked in "
+             "testing, Horde and versus are untested. Voice chat is not supported yet. Windows may ask about the firewall: "
+             "allow Private networks.", 325), "syslink");
     add(make("SkipLogos", "Skip the intro logos", Tab::Gameplay, Kind::Bool, PG, 0,
              "Starts at the title screen without the publisher / studio logo films. The loading film and cutscenes still play.", 326),
         "skiplogos");
@@ -439,6 +446,9 @@ Availability can(Game g, const std::string& f, Version ver, const Environment& e
         if (g == Game::Gears1 && !cap_exe(env, "gow1_aniso16")) return no(not_yet(gi, "needs its next build"));
     } else if (f == "pool") {
         if (g == Game::Gears1 && !cap_exe(env, "gow1_texture_pool_mb")) return no(not_yet(gi, "needs its next build"));
+    } else if (f == "syslink") {   // 0.3.5: SDK patch 49b (the runtime's net_system_link); Gears 2 first
+        if (!cap_rt(env, "net_system_link")) return no(not_yet(gi, "needs its next build"));
+        if (g != Game::Gears2) return no(not_yet(gi, "System Link is being tested in Gears 2 first"));
     } else if (f == "framecap") {
         if (g == Game::Gears1 && !cap_exe(env, "gow1_max_fps")) return no(not_yet(gi, "needs its next build"));
     } else if (f == "lang") {   // the SDK runtime's --user_language / --user_country
@@ -1008,6 +1018,7 @@ std::vector<std::string> build_args(Game g, Version ver, const Settings& s, cons
     }
     if (s.i("Monitor") > 0) a.push_back("--monitor=" + std::to_string(s.i("Monitor")));
     if (avail("Players") && s.i("Players") > 0) a.push_back("--local_players=" + std::to_string(s.i("Players") + 1));
+    if (on("SystemLink")) a.push_back("--net_system_link=true");   // 0.3.5: off = not sent (the runtime's default)
     // PS1 929: FPS counter
     switch (s.i("FpsMode")) {
     case 1: a.push_back("--gow2_fps_bar=top"); break;
