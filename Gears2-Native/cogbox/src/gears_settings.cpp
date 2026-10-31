@@ -1005,6 +1005,8 @@ std::vector<std::string> build_args(Game g, Version ver, const Settings& s, cons
         if (l > 0 && avail("Lang") && lo && choice_available(*lo, g, l).ok) {
             a.push_back("--user_language=" + std::to_string(lang[l]));
             a.push_back("--user_country=" + std::to_string(country[l]));
+            // GitHub #76: Gears 1 plays Latin American Spanish only for a North American game region (SDK patch 47)
+            if (isG1 && l == 7 && cap_rt(env, "user_game_region")) a.push_back("--user_game_region=255");
         }
     }
     if (s.i("Monitor") > 0) a.push_back("--monitor=" + std::to_string(s.i("Monitor")));
