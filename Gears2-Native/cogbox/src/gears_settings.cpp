@@ -310,9 +310,7 @@ std::vector<Option> make_options(Game g) {
              "business.", 327), "cheats");
     add(make("Mutators", "Unlock all mutators", Tab::Gameplay, Kind::Bool, SH, 0,
              "Every mutator (gameplay modifier) available from the start. Writes nothing to your profile.", 328), "mutators");
-    add(make("LevelSelect", "Level select menu (experimental)", Tab::Gameplay, Kind::Bool, SH, 0,
-             "The game's own hidden level-select menu (Judgment). Its list has no text yet: Down moves, A loads (entry 1 Sera "
-             "University ... 17 Aftermath 5).", 329), "levelsel");
+    // Shagg 31 Oct: the level select menu is no longer offered (the port's --gowj_level_select stays for testing)
     // 0.2.0 (GitHub #4): the game's own language - the runtime's user_language (Xbox language IDs, issue #4's table)
     add(choice("Lang", "Game language", Tab::Gameplay, PG,
                { "Default (English)", "English (US)", "English (UK)", "French", "German", "Italian", "Spanish (Spain)",
@@ -885,10 +883,9 @@ std::vector<std::string> build_args(Game g, Version ver, const Settings& s, cons
         if (avail("Trilinear")) a.push_back("--gow1_trilinear=" + fmt_bool(s.b("Trilinear")));
         if (avail("MipFade")) a.push_back("--gow1_fast_mip_fade=" + fmt_bool(s.b("MipFade")));
     }
-    // PS1 869-871: cheats, mutators, level select
+    // PS1 869-871: cheats, mutators (level select removed, Shagg 31 Oct)
     if (on("Cheats")) a.push_back("--gow3_cheats=true");
     if (on("Mutators")) a.push_back("--gow3_unlock_mutators=true");
-    if (on("LevelSelect")) a.push_back("--gowj_level_select=true");
     // PS1 873-898: the game's own engine settings through --ue3_ini_edits
     {
         const std::string ei = k_engineIni[gi];

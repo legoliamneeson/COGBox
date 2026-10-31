@@ -383,7 +383,6 @@ bool make_report(App &a, int g, const std::string &session, const std::string &w
         if (cs.i("Api") == 1) exp += "Vulkan, ";
         if (cs.i("AAMode") >= 2) exp += std::string(cs.i("AAMode") == 2 ? "FSR" : cs.i("AAMode") == 3 ? "DLSS" : "XeSS") + ", ";
         if (cs.i("FrameGen") > 0) exp += "frame generation, ";
-        if (cs.b("LevelSelect")) exp += "level select menu, ";
         sys += "Experimental settings on: " + (exp.empty() ? std::string("none") : exp.substr(0, exp.size() - 2)) + "\r\n\r\n";
     }
     // the game files' fingerprints (never the files)
