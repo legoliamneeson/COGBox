@@ -21,12 +21,40 @@
 extern "C" const char gn_cpu_level_marker[];
 #endif
 
+// save_watch.cpp (GitHub #55): save / checkpoint / content files in the user data folder, logged at info level.
+void XenosInstallSaveWatch();
+
 namespace {
 
 // GitHub #59: Wine's DXGI can name another vendor than the card (1002 AMD on an NVIDIA RTX 5060 Ti). The first
 // hardware adapter's ids, kept so the Vulkan backend can compare them with its own (XenosReportVulkanDevice).
 uint32_t g_dxgi_vendor = 0, g_dxgi_device = 0;
 uint32_t g_vk_vendor = 0, g_vk_device = 0;
+// GitHub #59 (Judgment under Wine, follow-up): the D3D12 backend's own adapter (found by the device's LUID), which is
+// not always DXGI's first hardware adapter (laptops with two GPUs). XenosReportD3D12Device.
+uint32_t g_d3d_vendor = 0, g_d3d_device = 0;
+
+const char* VendorName(uint32_t v) {
+  switch (v) {
+    case 0x10DE: return "NVIDIA";
+    case 0x1002: case 0x1022: return "AMD";
+    case 0x8086: return "Intel";
+    case 0x5143: return "Qualcomm";
+    case 0x106B: return "Apple";
+    case 0x1414: return "Microsoft (software)";
+    case 0x10005: return "Mesa (software)";
+    default: return "other";
+  }
+}
+
+// One line naming the vendor id every GPU-specific choice uses (XenosGpuVendorId) and where it came from.
+void LogVendorChoice() {
+  const uint32_t v = g_vk_vendor ? g_vk_vendor : g_d3d_vendor ? g_d3d_vendor : g_dxgi_vendor;
+  const char* from = g_vk_vendor ? "the Vulkan device" : g_d3d_vendor ? "the D3D12 adapter" : "DXGI's first hardware adapter";
+  REXLOG_INFO("pc: GPU vendor for vendor-specific choices: {:04X} ({}) from {} | DXGI first adapter {:04X}:{:04X}, "
+              "D3D12 adapter {:04X}:{:04X}, Vulkan device {:04X}:{:04X} (0000 = not used)",
+              v, VendorName(v), from, g_dxgi_vendor, g_dxgi_device, g_d3d_vendor, g_d3d_device, g_vk_vendor, g_vk_device);
+}
 
 std::string Utf8(const wchar_t* w) {
   if (!w || !*w) return {};
@@ -179,10 +207,26 @@ void XenosReportVulkanDevice(uint32_t vendor, uint32_t device, const char* name)
   } else {
     REXLOG_INFO("pc: Vulkan device {} matches DXGI (vendor {:04X} device {:04X})", name ? name : "?", vendor, device);
   }
+  LogVendorChoice();
 }
 
-// The vendor id any GPU-specific choice should use: the Vulkan device's when known, else DXGI's first hardware adapter.
-uint32_t XenosGpuVendorId() { return g_vk_vendor ? g_vk_vendor : g_dxgi_vendor; }
+// GitHub #59 follow-up: called by the D3D12 backend with its own adapter's ids (EnumAdapterByLuid of the device). Under
+// Wine (vkd3d-proton) these can be as wrong as DXGI's list; they are still the rendering device's, so they win over the
+// list's first adapter, and a Vulkan device (if one is ever reported too) wins over both.
+void XenosReportD3D12Device(uint32_t vendor, uint32_t device, const char* name) {
+  g_d3d_vendor = vendor;
+  g_d3d_device = device;
+  if (g_dxgi_vendor && (g_dxgi_vendor != vendor || g_dxgi_device != device)) {
+    REXLOG_INFO("pc: D3D12 renders on {} (vendor {:04X} device {:04X}), not DXGI's first adapter ({:04X}:{:04X})",
+                name ? name : "?", vendor, device, g_dxgi_vendor, g_dxgi_device);
+  }
+  LogVendorChoice();
+}
+
+// The vendor id any GPU-specific choice should use: the rendering device's - the Vulkan device when on Vulkan (under
+// Wine: the host's real driver), else the D3D12 backend's adapter - and DXGI's first hardware adapter only before a
+// backend has started. Vulkan's id wins when both are known and disagree (GitHub #59: DXGI said 1002, Vulkan 10DE).
+uint32_t XenosGpuVendorId() { return g_vk_vendor ? g_vk_vendor : g_d3d_vendor ? g_d3d_vendor : g_dxgi_vendor; }
 
 void XenosLogSystemReport(const char* game) {
 #if defined(_M_ARM64)
@@ -203,4 +247,5 @@ void XenosLogSystemReport(const char* game) {
   LogControllers();
   REXLOG_INFO("pc: command line: {}", Utf8(GetCommandLineW()));
   REXLOG_INFO("pc: ---- end of PC description ----");
+  XenosInstallSaveWatch();  // GitHub #55: every game calls this report once, right after logging starts
 }

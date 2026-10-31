@@ -1923,7 +1923,13 @@ float4 main(float4 pos : SV_Position, uint s : SV_SampleIndex) : SV_Target0 {
     OpenPipelineList();  // patch 0058: read the recorded pipelines, queue them to the workers, then record new ones
     REXLOG_INFO("gow2_renderer: our renderer on: {} | {} | shader back end {} | cache {} | rect-list GS {} | depth resolve {} | clear pair "
                 "{:016X}/{:016X}, no-op point VS {:016X}",
-                backend_->Describe(), cache_->CompilerDescription(), cache_->Dxbc() ? (rect_gs_dxbc_ ? "dxbc" : "dxbc (DXBC GS MISSING)") : "hlsl",
+                backend_->Describe(), cache_->CompilerDescription(), cache_->Dxbc() ? (backend_->GetShaderIL() != gpu::ShaderIL::kDxil
+                                       // GitHub #59: on Vulkan the DXBC is converted to SPIR-V (dxbc_spirv.cpp) and
+                                       // rectangle lists use the SPIR-V rect_gs_ (rect-list GS below); no DXBC GS is
+                                       // made or needed there, so this used to say "DXBC GS MISSING" for nothing.
+                                       ? "dxbc (as SPIR-V; rect lists use the SPIR-V GS)"
+                                       : rect_gs_dxbc_ ? "dxbc" : "dxbc (DXBC GS MISSING)")
+                                  : "hlsl",
                 dir.string(), rect_gs_ ? "ok" : "MISSING", depth_resolve_ ? "ok" : "MISSING", hints_.clear_vs,
                 hints_.clear_ps, hints_.dummy_point_vs);
     return true;
