@@ -306,8 +306,8 @@ std::vector<Option> make_options(Game g) {
     // runtime behaves exactly as before ("No Network Connection").
     add(make("SystemLink", "System Link - LAN play (experimental)", Tab::Gameplay, Kind::Bool, PG, 0,
              "Experimental - lets the game's System Link find and join games on other PCs on your network (or on a LAN VPN "
-             "such as Radmin VPN, ZeroTier or Hamachi; not internet VPNs like NordVPN). Gears 2 first: co-op worked in "
-             "testing, Horde and versus are untested. Voice chat is not supported yet. Windows may ask about the firewall: "
+             "such as Radmin VPN, ZeroTier or Hamachi; not internet VPNs like NordVPN). Title Update versions only. Gears 2 "
+             "co-op worked in testing; its other modes and the other games are untested. Voice chat is not supported yet. Windows may ask about the firewall: "
              "allow Private networks.", 325), "syslink");
     add(make("SkipLogos", "Skip the intro logos", Tab::Gameplay, Kind::Bool, PG, 0,
              "Starts at the title screen without the publisher / studio logo films. The loading film and cutscenes still play.", 326),
@@ -448,7 +448,6 @@ Availability can(Game g, const std::string& f, Version ver, const Environment& e
         if (g == Game::Gears1 && !cap_exe(env, "gow1_texture_pool_mb")) return no(not_yet(gi, "needs its next build"));
     } else if (f == "syslink") {   // 0.3.5: SDK patch 49b (the runtime's net_system_link); Gears 2 first
         if (!cap_rt(env, "net_system_link")) return no(not_yet(gi, "needs its next build"));
-        if (g != Game::Gears2) return no(not_yet(gi, "System Link is being tested in Gears 2 first"));
         if (ver != Version::TitleUpdate) return no("System Link is for the Title Update version only.");   // Shagg 15:53
     } else if (f == "framecap") {
         if (g == Game::Gears1 && !cap_exe(env, "gow1_max_fps")) return no(not_yet(gi, "needs its next build"));
@@ -529,7 +528,9 @@ std::string tooltip_for(const Option& o, Game g, const Availability& a, const En
         base += "\nYour graphics card: " + (gpu.empty() ? std::string("not detected") : gpu);
     }
     if (g == Game::Judgment && o.id == "FpsMode") return not_yet(2, "game's own counter") + " " + base;   // PS1 476
-    if (g == Game::Judgment && o.id == "Players") return "Untested in Judgment. " + base;                 // PS1 477
+    if (g == Game::Judgment && o.id == "Players") return "Untested in Judgment. " + base;
+    if (o.id == "SystemLink" && g != Game::Gears2 && a.ok)   // Shagg 16:07: all four games' title updates; Gears 2 tested
+        return std::string("Untested in ") + (g == Game::Gears3 ? "Gears 3" : g == Game::Judgment ? "Judgment" : "Gears 1") + " - please tell us in #72. " + base;                 // PS1 477
     if (g == Game::Gears1 && o.id == "FpsMode") return not_yet(3, "game's own counter") + " " + base;
     if (g == Game::Gears1 && o.id == "Players" && a.why.empty()) return "Untested in Gears 1. " + base;
     if (g == Game::Judgment && o.id == "FrameCap")   // GitHub #38: as on Xenia Canary, unlimited can leave a loading screen endless

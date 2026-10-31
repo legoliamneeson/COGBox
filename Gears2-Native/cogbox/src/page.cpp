@@ -23,7 +23,7 @@ struct HelpTest { unsigned games; const char *text; };
 static const HelpTest k_helpTest[] = {
     { 2,  "Sudden death / \"cursed\" save, or a teammate killing you (#55, #68, #79, #80): if it happens to you, play to a checkpoint, save and quit, resume and play on until it happens, then send a problem report (and your saves from before and after, if you can). This version logs every save file the game writes, so your report shows what went wrong." },
     { 2,  "Raam's Shadow DLC not found (#79): if the game sometimes needs a restart or two before it sees the DLC, send a problem report from a start where it didn't." },
-    { 1,  "System Link - LAN play (experimental, #72): turn it on in Gameplay on two PCs on the same network (or a LAN VPN such as Radmin VPN / ZeroTier / Hamachi), host co-op, Horde or versus on one and join from the other. Tell us in GitHub issue #72 what worked and what didn't, with a problem report from both PCs." },
+    { 15, "System Link - LAN play (experimental, #72): turn it on in Gameplay on two PCs on the same network (or a LAN VPN such as Radmin VPN / ZeroTier / Hamachi), host co-op, Horde or versus on one and join from the other. Tell us in GitHub issue #72 what worked and what didn't, with a problem report from both PCs." },
     { 15, "Other versions of the game (regional discs, other title updates): if yours isn't the one COGBox expects, tell us whether it works." },
 };
 
