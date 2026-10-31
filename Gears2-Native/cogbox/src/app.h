@@ -107,6 +107,7 @@ struct App {
 };
 
 void set_message(App &a, const std::string &m, bool bad = false);
+void report_now(App &a, int g, const std::string &session);   // page.cpp: the About tab problem report
 // Job 523: a controller button's name for the connected pad - "A" on Xbox, "Cross" on PlayStation (A B X Y LB RB Back Start).
 const char *pad_name(const App &a, const char *xbox);
 void set_borderless(App &a, bool on);   // job 523: saved in CogBox.ini [Window] Borderless

@@ -17,6 +17,14 @@
 
 // ---- the PC, for the settings ---------------------------------------------------------------------------------------
 // Searching a 100 MB exe for a word takes a moment, so each (file, word) answer is kept.
+// Shagg 31 Oct: the About tab's problem report (also after the experimental-settings prompt, main.cpp "reportexp")
+void report_now(App &a, int g, const std::string &session)
+{
+    std::string zip, err;
+    if (make_report(a, g, session, "", zip, err)) { set_message(a, std::string(a.wine ? "Saved in COGBox's reports folder: " : "Saved on your desktop: ") + zip.substr(zip.find_last_of('\\') + 1), false); if (a.wine) shell_open(zip.substr(0, zip.find_last_of('\\'))); }
+    else set_message(a, "Couldn't make the report: " + err, true);
+}
+
 static bool file_has(const std::string &path, const std::string &needle)
 {
     static std::map<std::string, bool> cache;
@@ -815,11 +823,16 @@ static void about_tab(App &a, int g)
     if (small_button("Make a problem report")) {
         std::string s = newest_session(g);
         if (s.empty()) set_message(a, std::string("No play of ") + d.name + " yet - play once, then make the report.", false);
-        else {
-            std::string zip, err;
-            if (make_report(a, g, s, "", zip, err)) { set_message(a, std::string(a.wine ? "Saved in COGBox's reports folder: " : "Saved on your desktop: ") + zip.substr(zip.find_last_of('\\') + 1), false); if (a.wine) shell_open(zip.substr(0, zip.find_last_of('\\'))); }
-            else set_message(a, "Couldn't make the report: " + err, true);
-        }
+        else if (!a.ini.geti("Notices", "ReportExperimentalNever", 0)) {   // Shagg 31 Oct: experimental settings off first
+            ask(a, "reportexp", g, "Before you make the report",
+                "Experimental settings (Vulkan, FSR / DLSS / XeSS, frame generation, the level select menu and others) are for "
+                "testing, not for regular play - for the smoothest play, use settings that aren't marked experimental.\n\n"
+                "Please turn every experimental setting off, play again and then make the report - unless the report is "
+                "about one of those settings. The report lists the experimental settings that were on.",
+                { "Make the report", "Cancel" });
+            a.modal.check = "Don't show this again";
+            a.modal.data = s;
+        } else report_now(a, g, s);
     }
     ImGui::SameLine();
     if (small_button("Reset settings to defaults...")) ask(a, "reset", g, "Reset to defaults", "Put every setting of every game back to its default? Your saves are not touched.", { "Reset", "Cancel" });

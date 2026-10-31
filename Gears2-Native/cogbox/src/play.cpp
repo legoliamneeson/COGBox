@@ -377,6 +377,15 @@ bool make_report(App &a, int g, const std::string &session, const std::string &w
     std::string sys = "Game: " + std::string(d.name) + "\r\nSession: " + session.substr(session.find_last_of('\\') + 1) + "\r\n";
     if (!what.empty()) sys += "What happened (the launcher's reading): " + what + "\r\n";
     sys += "COGBox: " COGBOX_VERSION "\r\nPort: " + st.exe() + "\r\n\r\n" + report_system_text(displays_text()) + "\r\n";
+    {   // Shagg 31 Oct: name the experimental settings that were on, so a report shows them at once
+        const gs::Settings &cs = a.cur[g];
+        std::string exp;
+        if (cs.i("Api") == 1) exp += "Vulkan, ";
+        if (cs.i("AAMode") >= 2) exp += std::string(cs.i("AAMode") == 2 ? "FSR" : cs.i("AAMode") == 3 ? "DLSS" : "XeSS") + ", ";
+        if (cs.i("FrameGen") > 0) exp += "frame generation, ";
+        if (cs.b("LevelSelect")) exp += "level select menu, ";
+        sys += "Experimental settings on: " + (exp.empty() ? std::string("none") : exp.substr(0, exp.size() - 2)) + "\r\n\r\n";
+    }
     // the game files' fingerprints (never the files)
     sys += std::string("Game files: ") + (st.dataDir.empty() ? "none" : st.xexMatch ? "the expected release" : "a different release (default.xex " +
            cached_sha1(a.ini, join(st.dataDir, "default.xex")) + ", " + std::to_string(file_size(join(st.dataDir, "default.xex"))) + " bytes)") + "\r\n";

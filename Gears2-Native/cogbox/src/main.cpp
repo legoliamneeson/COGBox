@@ -116,6 +116,15 @@ static void answered(App &a)
         a.ini.set("Notices", "TitleUpdatesSeen", COGBOX_VERSION);
         a.ini.save();
     }
+    else if (m.tag == "reportexp") {   // Shagg 31 Oct: the About tab report, after the experimental-settings prompt
+        if (m.checked) { a.ini.seti("Notices", "ReportExperimentalNever", 1); a.ini.save(); }
+        if (m.answer == 0) report_now(a, m.game, m.data);
+    }
+    else if (m.tag == "expnotice") {   // Shagg 31 Oct: experimental settings are for testing, not for regular play
+        if (m.checked) a.ini.seti("Notices", "ExperimentalNever", 1);
+        a.ini.set("Notices", "ExperimentalSeen", COGBOX_VERSION);
+        a.ini.save();
+    }
     else if (m.tag == "turec") {   // 0.2.0: Gears 2 / 3 without Title Update 6
         if (m.checked && g >= 0) { a.ini.seti("Notices", std::string("TuRecommendNever_") + game_def(g).key, 1); a.ini.save(); }
     }
@@ -163,6 +172,16 @@ void startup_notices(App &a)
             "    Gears of War - Title Update 5 (required)\n    Gears of War 2 - Title Update 6\n    Gears of War 3 - Title Update 6\n    Gears of War: Judgment - Title Update 4 (required for now)\n\n"
             "They give the best compatibility and performance. Add each one from your own console (ADD UPDATE, or the game's "
             "About tab) - COGBox doesn't include game or update files.", { "Continue" });
+        a.modal.check = "Don't show this again";
+        return;
+    }
+    if (!a.ini.geti("Notices", "ExperimentalNever", 0) && a.ini.get("Notices", "ExperimentalSeen") != COGBOX_VERSION) {
+        ask(a, "expnotice", -1, "Experimental settings",
+            "Settings marked experimental (Vulkan, FSR / DLSS / XeSS, frame generation, the level select menu and others) "
+            "are there for testing and debugging. They are not meant for regular play yet: they can be slow, look wrong "
+            "or crash.\n\n"
+            "Before you send a report, please turn every experimental setting off and try again - unless the report is "
+            "about one of those settings.", { "Continue" });
         a.modal.check = "Don't show this again";
     }
 }
