@@ -23,6 +23,11 @@ extern "C" const char gn_cpu_level_marker[];
 
 namespace {
 
+// GitHub #59: Wine's DXGI can name another vendor than the card (1002 AMD on an NVIDIA RTX 5060 Ti). The first
+// hardware adapter's ids, kept so the Vulkan backend can compare them with its own (XenosReportVulkanDevice).
+uint32_t g_dxgi_vendor = 0, g_dxgi_device = 0;
+uint32_t g_vk_vendor = 0, g_vk_device = 0;
+
 std::string Utf8(const wchar_t* w) {
   if (!w || !*w) return {};
   int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
@@ -125,6 +130,7 @@ void LogGraphicsCards() {
     REXLOG_INFO("pc: graphics card {}: {} (vendor {:04X} device {:04X}{}) - {} MB own memory, driver {}", i,
                 Utf8(d.Description), d.VendorId, d.DeviceId, (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) ? ", software" : "",
                 d.DedicatedVideoMemory >> 20, driver);
+    if (g_dxgi_vendor == 0 && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) { g_dxgi_vendor = d.VendorId; g_dxgi_device = d.DeviceId; }
     a->Release();
   }
   factory->Release();
@@ -159,6 +165,24 @@ void LogControllers() {
 }
 
 }  // namespace
+
+// GitHub #59: called by the Vulkan backend once it has picked its device. The Vulkan ids come from the driver itself
+// (under Wine: the host's real driver), so they win over DXGI's when the two disagree; both are logged.
+void XenosReportVulkanDevice(uint32_t vendor, uint32_t device, const char* name) {
+  g_vk_vendor = vendor;
+  g_vk_device = device;
+  if (g_dxgi_vendor == 0) {
+    REXLOG_INFO("pc: Vulkan device {} (vendor {:04X} device {:04X}); no DXGI ids to compare", name ? name : "?", vendor, device);
+  } else if (g_dxgi_vendor != vendor) {
+    REXLOG_WARN("pc: graphics vendor ids disagree - DXGI {:04X}:{:04X}, Vulkan {:04X}:{:04X} ({}); using Vulkan's",
+                g_dxgi_vendor, g_dxgi_device, vendor, device, name ? name : "?");
+  } else {
+    REXLOG_INFO("pc: Vulkan device {} matches DXGI (vendor {:04X} device {:04X})", name ? name : "?", vendor, device);
+  }
+}
+
+// The vendor id any GPU-specific choice should use: the Vulkan device's when known, else DXGI's first hardware adapter.
+uint32_t XenosGpuVendorId() { return g_vk_vendor ? g_vk_vendor : g_dxgi_vendor; }
 
 void XenosLogSystemReport(const char* game) {
 #if defined(_M_ARM64)

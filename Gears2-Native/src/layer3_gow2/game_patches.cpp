@@ -240,7 +240,7 @@ void Gow2MaxTickRate(PPCRegister& f1) {
 // Stage 7.5 ultrawide hooks (see the top of the file).
 // ---- 0.3.0: any ultrawide shape (GitHub #60: 21:9 and 32:9) --------------------------------------------------------
 // --gow2_aspect picks the shape when gow2_ultrawide is on: "" = the Canary patch's own 21:9 (1280x550, unchanged), "auto"
-// = the monitor's shape, or "21:9", "32:9", "3440:1440", "3.56". The scene height is 1280 / aspect (even, 320-720).
+// = the monitor's shape, or "21:9", "32:9", "3440:1440", "3.56". The scene height is 1280 / aspect (even, 536-720).
 // The field-of-view factor is Canary's 21:9 value times how much more the shape widens than 21:9 does, at the half
 // angle (34.05 deg) where Canary's 21:9 factor is exact (the hooks don't see the game's own field of view).
 namespace uwshape {
@@ -265,7 +265,13 @@ inline uint32_t Height(const std::string& v, const char* tag) {
     REXLOG_INFO("{}: aspect '{}' = {:.4f} is not wider than 16:9 - Canary's 21:9 is used", tag, v, aspect);
     return 550u;
   }
-  const uint32_t h = std::clamp(uint32_t(std::lround(1280.0 / aspect / 2.0)) * 2u, 320u, 720u);
+  // GitHub #60/#73: below ~536 rows (wider than ~2.39:1) the game's render-target pool setup sub_8281C680 traps
+  // (size from sub_829BABD8, page-aligned, > the pool's capacity at +20 -> sub_82AC6098). 536 = 3440x1440, the widest
+  // shape reported working. Wider monitors get a 1280x536 picture, pillarboxed by gow2_present_frame_aspect.
+  constexpr uint32_t kMinRows = 536u;
+  const uint32_t want = uint32_t(std::lround(1280.0 / aspect / 2.0)) * 2u;
+  const uint32_t h = std::clamp(want, kMinRows, 720u);
+  if (h != want) REXLOG_INFO("{}: aspect {:.4f} wants {} rows; clamped to {} (32:9 is pillarboxed until the wide-render fix)", tag, aspect, want, h);
   REXLOG_INFO("{}: aspect '{}' = {:.4f} -> scene 1280x{}", tag, v, aspect, h);
   return h;
 }

@@ -75,6 +75,12 @@ std::unique_ptr<Backend> CreateVulkanBackend() { return nullptr; }
 
 #include "vk_present_spirv.h"
 
+// system_report.cpp (GitHub #59): logs the Vulkan ids against DXGI's; XenosGpuVendorId() prefers these.
+// (Move to <xenos/dev_tools.h> next to XenosLogSystemReport.)
+#ifdef _WIN32
+void XenosReportVulkanDevice(uint32_t vendor, uint32_t device, const char* name);
+#endif
+
 namespace xenos::renderer::gpu {
 namespace {
 
@@ -2299,6 +2305,9 @@ class VulkanBackend final : public Backend {
     p2.pNext = &p12;
     vk_.vkGetPhysicalDeviceProperties2(physical_, &p2);
     device_name_ = p2.properties.deviceName;
+#ifdef _WIN32
+    XenosReportVulkanDevice(p2.properties.vendorID, p2.properties.deviceID, device_name_.c_str());  // GitHub #59
+#endif
     driver_name_ = p12.driverName[0] ? std::string(p12.driverName) + " " + p12.driverInfo : std::string("unknown");
     device_api_ = p2.properties.apiVersion;
     limits_ = p2.properties.limits;

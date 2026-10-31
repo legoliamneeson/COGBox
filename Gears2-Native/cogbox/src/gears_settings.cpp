@@ -212,6 +212,11 @@ std::vector<Option> make_options(Game g) {
                "4x: 5120x2880. Real detail, not an upscale. Match my monitor: the smallest scale that covers the screen, "
                "resampled to its exact size. 1080p: drawn at 720p and upscaled to the screen with sharpening - fast, for "
                "weaker graphics cards; softer than real detail.", 340), "", "", true);
+    // GitHub #59: the 1080p mode's RCAS sharpen made text and some textures look wrong under Wine / Proton (Linux,
+    // NVIDIA). Automatic = on in Windows, off under Wine; On / Off override it everywhere.
+    add(choice("Sharpen", "Upscale sharpening (1080p)", Tab::Graphics, PG, { "Automatic", "On", "Off" }, 0,
+               "With the 1080p render resolution: sharpen the upscaled picture. Automatic = on, except on Steam Deck / "
+               "Linux (Wine / Proton), where it can make text and some textures look wrong.", 0));
     add(choice("AAMode", "Anti-aliasing", Tab::Graphics, PG, { "Off", "SMAA (recommended)", "FSR (highly experimental)", "DLSS (NVIDIA RTX, highly experimental)", "XeSS (highly experimental)" }, 0,
                "SMAA: light, sharp, any GPU. FSR: temporal anti-aliasing of the 3D scene, any DX12 GPU. DLSS: the same on "
                "NVIDIA RTX cards. XeSS: the same, best on Intel Arc cards.", 346), "", "", true);
@@ -257,7 +262,10 @@ std::vector<Option> make_options(Game g) {
     // Job 620 (PR #43 bbb7cee: batched result copies, early submits, wake on GPU completion - Judgment Museum 93 fps
     // with it vs 94 off, Gears 3 Gridlock steadier): on by default in Gears 3 and Judgment, where light showed through
     // walls (GitHub #30, #41). Gears 2 keeps it off by default, as in the PR.
-    add(make("RealOcclusion", "Real occlusion", Tab::Graphics, Kind::Bool, PG, g == Game::Gears2 ? 0 : 1,
+    // GitHub #75 (report 28b2db29): Gears 2 shows flares through walls for the same reason (every ZPass query answered
+    // with the fake count 1000). Now offered and on by default there too, as in Gears 3 / Judgment. If distant surfaces
+    // flicker (jobs 139-140, the old late-answer path), turn it off; Lens Flares off is the other workaround.
+    add(make("RealOcclusion", "Real occlusion", Tab::Graphics, Kind::Bool, PG, 1,
              "The game asks the graphics card whether things like light flares are hidden behind walls; on means it "
              "waits for the card's real answer instead of always being told \"visible\", so flares and hidden objects "
              "behind walls disappear as on the console, and fewer hidden things are drawn. DirectX 12 only. "
@@ -446,8 +454,9 @@ Availability can(Game g, const std::string& f, Version ver, const Environment& e
         if (!cap_file(env, "amd_fidelityfx_framegeneration_dx12.dll")) return no(not_yet(gi, "this build has no AMD frame generation files"));
     } else if (f == "mute") {
         if (!cap_exe(env, std::string(k_procNames[gi]) + "_mute_unfocused")) return no(not_yet(gi, "needs its next build"));
-    } else if (f == "realocclusion") {   // PR #43: tried in Gears 3 and Judgment only
-        if (g == Game::Gears2) return no(not_yet(0, "tried in Gears 3 and Judgment so far"));
+    } else if (f == "realocclusion") {   // PR #43: Gears 3 and Judgment; GitHub #75: Gears 2 too
+        // an older Gears 2 exe without strict queries would only warn - keep the box greyed out for it
+        if (g == Game::Gears2 && !cap_exe(env, "gow2_renderer_queries")) return no(not_yet(0, "needs its next build"));
         // 0.3.0: with Gears 1's shader pack it froze the title screen (frame 183, 14:10 runs) - off until that is fixed
         if (g == Game::Gears1) return no(not_yet(gi, "freezes Gears 1's title screen with its shader pack - off for now"));
     } else if (f == "vsync") {   // launcher patch 0155
@@ -490,6 +499,7 @@ Availability available(const Option& o, Game g, Version ver, const Settings& s, 
     else if (o.id == "SceneMode") on = s.i("AAMode") >= 2 && s.i("Api") == 0;        // PS1 352, 473; job 521
     else if (o.id == "FrameGen" && s.i("Api") != 0) { a.ok = false; a.why = "DirectX 12 only."; return a; }   // job 521
     else if (o.id == "RealOcclusion" && (s.i("Api") != 0 || env.wine)) { a.ok = false; a.why = "DirectX 12 only."; return a; }   // PR #43
+    else if (o.id == "Sharpen") on = s.i("Resolution") == 5;                         // GitHub #59: the 1080p mode only
     else if (o.id == "Monitor") on = env.screen_count >= 2;                           // PS1 335
     else if (o.id == "WineApi") on = env.wine && s.i("Api") == 0;                     // Shagg 13:16, job 643
     a.ok = on;
@@ -788,7 +798,12 @@ std::vector<std::string> build_args(Game g, Version ver, const Settings& s, cons
     int scale = s.i("Resolution") + 1;
     if (scale == 6) {   // 0.2.0 "1080p": 720p drawn, upscaled to the window (Lanczos) and sharpened (RCAS)
         a.insert(a.end(), { "--gow2_renderer_resolution_scale=1", "--gow2_present_native_size=true",
-                            "--gow2_present_upscale_filter=lanczos", "--gow2_present_sharpen=0.5" });
+                            "--gow2_present_upscale_filter=lanczos" });
+        // GitHub #59: Automatic sharpens except under Wine; On / Off are the player's
+        const int sh = s.i("Sharpen");
+        const bool sharpen = sh == 1 || (sh == 0 && !env.wine);
+        a.push_back(sharpen ? "--gow2_present_sharpen=0.5" : "--gow2_present_sharpen=0");
+        if (env.wine && sh == 0) notes.push_back("launcher: Wine / Proton - upscale sharpening off (Automatic; GitHub #59)");
         scale = 1;
     } else if (scale >= 5) { a.push_back("--gow2_renderer_resolution_scale=0"); a.push_back("--gow2_present_native_size=true"); scale = 2; }
     else a.push_back("--gow2_renderer_resolution_scale=" + std::to_string(scale));
@@ -1007,6 +1022,11 @@ std::vector<std::string> build_args(Game g, Version ver, const Settings& s, cons
         const double boost = mouseLook ? 4.0 : 1.0;
         a.insert(a.end(), { "--mnk_mode=true", "--mnk_mouse=true", "--mnk_sensitivity=" + fmt_double(s.f("Sens") * 2.0 / boost) });
         if (nativeMouse) a.insert(a.end(), { "--ue3_mouse_look=true", "--ue3_mouse_scale=" + fmt_double(s.f("Sens")) });
+        // GitHub #52: keep the turn speed per count the same whatever Field of view (%) is (UE3 scales the mouse by the
+        // FOV). Only the FOV % here: the ultrawide patch (gow3_aspect) widens the projection, not FOVAngle, so
+        // PlayerInput's FOVScale does not see it - check that in the aspect code before adding its factor.
+        if (nativeMouse && avail("Fov") && s.i("Fov") != 100 && cap_exe(env, "ue3_mouse_fov_comp"))
+            a.push_back("--ue3_mouse_fov_comp=" + fmt_double(100.0 / static_cast<double>(s.i("Fov"))));
         if (mouseLook) {
             a.push_back("--pad_look_scale=0.25");
             a.push_back(std::string("--pad_look_deadzone=") + (g == Game::Gears2 ? "0.3" : isG3 ? "0" : "0.2"));
