@@ -1091,6 +1091,12 @@ std::vector<std::string> build_args(Game g, Version ver, const Settings& s, cons
             const int top = fgOn ? static_cast<int>(std::floor(hz / 2.0)) - 2 : hz - 3;
             if (isG3 && cap == 60) cap = 62;   // review 0158: Gears 3's 60 is its own 62 cap
             if (hz >= 50 && (cap < 0 || cap > top)) cap = top;
+            // GitHub #68 / #55 (Anya shoots Marcus, sudden headshot deaths, "cursed" checkpoint): every report ran Gears 3
+            // with vsync on and the engine limit lowered under the refresh (57 at 60 Hz); Shagg's runs with no engine
+            // limit never show it. With vsync on, Gears 3 now gets no engine limit (GetMaxTickRate 0, as "Unlimited") and
+            // the screen's vsync paces the frames. A --gow3_max_fps=N line in extra-args.txt (added later, so it wins)
+            // brings a cap back for testing.
+            if (isG3 && hz >= 50) cap = -1;
             notes.push_back("launcher: vsync on; " + env.monitor_device + " at " + std::to_string(hz) + " Hz (0 = unknown)" +
                             (fgOn ? ", frame generation on" : "") + " -> frame-rate cap " + std::to_string(cap));
         }
