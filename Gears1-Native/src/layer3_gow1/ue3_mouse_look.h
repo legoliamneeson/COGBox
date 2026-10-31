@@ -16,9 +16,12 @@
 //    (vtable +24) before it runs; keeps the "using a gamepad" flag across mouse events (axis accumulate hook) and
 //    takes the aim friction off while the mouse was used last.
 //  - Gears 1 (UE3 2006): the Gears 2 way with its own layout - viewport client at ProcessInput's this +56, the viewport
-//    argument is this +4, InputAxis has no bGamepad. Gears 1 has no "using a gamepad" flag, so no axis accumulate hook;
-//    "pad used last" comes from the game's XInput state wrapper (pad_state_fn) seeing the right stick deflected, and
-//    the friction native is AWarPC::execGetFrictionTarget (its result, the friction target, is cleared).
+//    argument is this +4, InputAxis has no bGamepad. Gears 1's ProcessInput is only reached by a direct `bl`, and a
+//    direct call goes to the weak sub_ symbol, not through the dispatcher, so SetFunction never sees it (v1's bug).
+//    So entry_fn is the client's Tick (reached through its vtable), which walks Viewports (this +viewports_off) and
+//    calls ProcessInput on each: the hook sends the motion to Viewports[0]'s client first. Gears 1 has no "using a
+//    gamepad" flag; "pad used last" comes from hooking the viewport client's InputAxis (vtable +24, reached by bctrl)
+//    when it is first found, and the friction native is AWarPC::execGetFrictionTarget (its result is cleared).
 //
 // Method and the Gears 3 base-disc / Gears 2 base-disc addresses from the BSD-3-Clause projects gow3-recomp
 // (Copyright (c) 2026, Flippage and the gow3-recomp contributors) and gears-of-war-2-pc-port / gow2-recomp
@@ -69,7 +72,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <mutex>
 
 #include <windows.h>
@@ -102,8 +104,9 @@ struct Build {
   // Gears 1 additions (defaults = the Gears 2 layout, so the other games' tables are unchanged).
   uint32_t client_off = 52;        // ProcessInput this -> viewport client pointer
   uint32_t viewport_arg_off = 0;   // InputAxis r4 = ProcessInput this + this offset
-  uint32_t pad_state_fn = 0;       // the game's XInputGetState wrapper (r3 user, r4 XINPUT_STATE*); used in place of
-                                   // player_axis_fn to learn "pad used last"
+  uint32_t viewports_off = 0;      // Gears 1: entry_fn is the client Tick (this r3, DeltaTime f1); its Viewports TArray
+                                   // (data, count) is at this + viewports_off. The pad-used-last signal then comes from hooking
+                                   // the viewport client's InputAxis at first use (no player_axis_fn needed).
 };
 
 namespace detail {
@@ -125,7 +128,13 @@ inline rex::runtime::FunctionDispatcher* g_dispatcher = nullptr;
 inline PPCFunc* g_entry_orig = nullptr;
 inline PPCFunc* g_axis_orig = nullptr;
 inline PPCFunc* g_friction_orig = nullptr;
-inline PPCFunc* g_pad_orig = nullptr;
+inline PPCFunc* g_client_axis_orig = nullptr;   // Gears 1: the viewport client's InputAxis (unhooked original)
+inline uint32_t g_client_axis_addr = 0;
+// One-shot diagnostics (logged a few times in the first minute, whatever ue3_mouse_log says).
+inline std::atomic<uint64_t> g_d_moves{0}, g_d_no_window{0}, g_d_no_capture{0}, g_d_not_look{0}, g_d_banked{0};
+inline std::atomic<uint64_t> g_d_entry_calls{0}, g_d_taken{0}, g_d_names_wait{0}, g_d_sent{0}, g_d_no_fn{0};
+inline std::atomic<uint64_t> g_d_pad_axis{0};
+inline uint32_t g_d_viewport = 0, g_d_count = 0, g_d_client = 0, g_d_vt = 0, g_d_fn = 0;
 inline std::atomic<bool> g_on{false};
 inline std::atomic<bool> g_names_bad{false};
 inline thread_local bool g_injecting = false;
@@ -143,7 +152,14 @@ class Listener : public rex::ui::WindowInputListener {
  public:
   void OnMouseMove(rex::ui::MouseEvent& e) override {
     rex::ui::Window* w = e.target();
-    if (!w || !w->IsMouseCaptureRequested() || !rex::input::mnk::IsMouseLookActive()) {
+    g_d_moves.fetch_add(1, std::memory_order_relaxed);
+    const bool no_window = !w;
+    const bool no_capture = !no_window && !w->IsMouseCaptureRequested();
+    const bool not_look = !rex::input::mnk::IsMouseLookActive();
+    if (no_window) g_d_no_window.fetch_add(1, std::memory_order_relaxed);
+    if (no_capture) g_d_no_capture.fetch_add(1, std::memory_order_relaxed);
+    if (not_look) g_d_not_look.fetch_add(1, std::memory_order_relaxed);
+    if (no_window || no_capture || not_look) {
       double x, y;
       Drain(&x, &y);  // menus / the in-game menu: nothing banked turns the camera afterwards
       return;
@@ -154,6 +170,7 @@ class Listener : public rex::ui::WindowInputListener {
       g_bank_dx += e.dx();
       g_bank_dy += e.dy();
     }
+    g_d_banked.fetch_add(1, std::memory_order_relaxed);
     g_last_mouse.store(Now(), std::memory_order_relaxed);
   }
 };
@@ -187,7 +204,7 @@ inline bool NamesOk(const uint8_t* base, uint64_t* mx, uint64_t* my) {
   *mx = LoadName(base, g_build->mouse_x_name);
   *my = LoadName(base, g_build->mouse_y_name);
   const uint32_t ix = uint32_t(*mx >> 32), iy = uint32_t(*my >> 32);
-  if (ix == 0 || iy == 0) return false;  // not made yet
+  if (ix == 0 || iy == 0) { g_d_names_wait.fetch_add(1, std::memory_order_relaxed); return false; }  // not made yet
   bool ok = ix != iy && ix < 0x400000 && iy < 0x400000;
   if (ok && g_build->right_x_name) {
     const uint32_t rx = Load32(base, g_build->right_x_name), ry = Load32(base, g_build->right_y_name);
@@ -256,24 +273,61 @@ inline bool SendClient(PPCContext& ctx, uint8_t* base, PPCFunc* fn, uint32_t cli
   c.f2.f64 = dt;
   return SafeCall(fn, &c, base);
 }
-inline void ProcessInputHook(PPCContext& ctx, uint8_t* base) {
-  const double dt = ctx.f1.f64;
-  const uint32_t viewport = ctx.r3.u32;
+inline void ClientAxisHook(PPCContext& ctx, uint8_t* base);
+// Sends this frame's banked motion to one viewport's client (its InputAxis, vtable +24), as ProcessInput does for sticks.
+inline void InjectViewport(PPCContext& ctx, uint8_t* base, uint32_t viewport, double dt) {
+  const uint32_t client = viewport ? Load32(base, viewport + g_build->client_off) : 0;
+  const uint32_t vt = client ? Load32(base, client) : 0;
+  const uint32_t fa = vt ? Load32(base, vt + kClientInputAxisSlot) : 0;
+  g_d_viewport = viewport; g_d_client = client; g_d_vt = vt; g_d_fn = fa;
+  // Gears 1: the first time the client's InputAxis is known, hook it for the pad-used-last signal.
+  if (g_build->viewports_off && fa && !g_client_axis_addr) {
+    if (PPCFunc* orig = g_dispatcher->GetFunction(fa)) {
+      g_client_axis_orig = orig;
+      g_client_axis_addr = fa;
+      const bool ok = g_dispatcher->SetFunction(fa, &ClientAxisHook);
+      REXLOG_INFO("ue3_mouse_look: viewport {:08X} client {:08X} vtable {:08X} InputAxis {:08X} - pad hook {}", viewport,
+                  client, vt, fa, ok ? "on" : "FAILED");
+    }
+  }
   double x = 0, y = 0;
   uint64_t mx, my;
-  if (viewport && Take(&x, &y) && NamesOk(base, &mx, &my)) {
-    bool sent = false;
-    const uint32_t client = Load32(base, viewport + g_build->client_off);
-    const uint32_t vt = client ? Load32(base, client) : 0;
-    const uint32_t fa = vt ? Load32(base, vt + kClientInputAxisSlot) : 0;
-    const uint32_t vparg = viewport + g_build->viewport_arg_off;
-    if (PPCFunc* fn = fa ? g_dispatcher->GetFunction(fa) : nullptr) {
-      sent = true;
-      if (x != 0) sent &= SendClient(ctx, base, fn, client, vparg, mx, x, dt);
-      if (y != 0) sent &= SendClient(ctx, base, fn, client, vparg, my, y, dt);
-    }
-    MaybeLog(x, y, sent);
+  if (!viewport || !Take(&x, &y)) return;
+  g_d_taken.fetch_add(1, std::memory_order_relaxed);
+  if (!NamesOk(base, &mx, &my)) return;
+  bool sent = false;
+  PPCFunc* fn = nullptr;
+  if (fa) fn = (fa == g_client_axis_addr && g_client_axis_orig) ? g_client_axis_orig : g_dispatcher->GetFunction(fa);
+  const uint32_t vparg = viewport + g_build->viewport_arg_off;
+  if (fn) {
+    sent = true;
+    if (x != 0) sent &= SendClient(ctx, base, fn, client, vparg, mx, x, dt);
+    if (y != 0) sent &= SendClient(ctx, base, fn, client, vparg, my, y, dt);
+    if (sent) g_d_sent.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    g_d_no_fn.fetch_add(1, std::memory_order_relaxed);
   }
+  MaybeLog(x, y, sent);
+}
+inline void Diag();
+inline void ProcessInputHook(PPCContext& ctx, uint8_t* base) {
+  g_d_entry_calls.fetch_add(1, std::memory_order_relaxed);
+  InjectViewport(ctx, base, ctx.r3.u32, ctx.f1.f64);
+  Diag();
+  g_entry_orig(ctx, base);
+}
+// Gears 1: the client's Tick (this r3, DeltaTime f1); it calls ProcessInput on each of Viewports (data, count at
+// this + viewports_off) with the same DeltaTime. The motion goes to Viewports[0] before the original runs.
+inline void ClientTickHook(PPCContext& ctx, uint8_t* base) {
+  g_d_entry_calls.fetch_add(1, std::memory_order_relaxed);
+  const uint32_t self = ctx.r3.u32;
+  const uint32_t data = self ? Load32(base, self + g_build->viewports_off) : 0;
+  const uint32_t count = self ? Load32(base, self + g_build->viewports_off + 4) : 0;
+  g_d_count = count;
+  const uint32_t viewport = (data && count > 0 && count < 64) ? Load32(base, data) : 0;
+  if (viewport) InjectViewport(ctx, base, viewport, ctx.f1.f64);
+  else { double x, y; Drain(&x, &y); }
+  Diag();
   g_entry_orig(ctx, base);
 }
 inline bool MouseLast() {
@@ -302,16 +356,37 @@ inline void AxisHook(PPCContext& ctx, uint8_t* base) {
   }
 }
 
-// Gears 1: the XInput state wrapper (r3 user, r4 XINPUT_STATE*, returns 0 on success). A right stick past the XInput
-// right dead zone marks the pad as used last (sThumbRX at +12, sThumbRY at +14, big-endian in guest memory).
-constexpr int kPadDeadZone = 8689;
-inline void PadStateHook(PPCContext& ctx, uint8_t* base) {
-  const uint32_t state = ctx.r4.u32;
-  g_pad_orig(ctx, base);
-  if (ctx.r3.u32 != 0 || !state) return;
-  const int rx = int16_t(uint16_t((base[state + 12] << 8) | base[state + 13]));
-  const int ry = int16_t(uint16_t((base[state + 14] << 8) | base[state + 15]));
-  if (std::abs(rx) > kPadDeadZone || std::abs(ry) > kPadDeadZone) g_last_pad.store(Now(), std::memory_order_relaxed);
+// Gears 1: the viewport client's InputAxis (client r3, viewport r4, ControllerId r5, Key r6 as an FName, Delta f1 -
+// the stick in -1..1, DeltaTime f2). A right stick past the XInput right dead zone marks the pad as used last.
+constexpr double kPadDeadZone = 8689.0 / 32767.0;
+inline void ClientAxisHook(PPCContext& ctx, uint8_t* base) {
+  const uint32_t key = uint32_t(ctx.r6.u64 >> 32);
+  const double v = ctx.f1.f64;
+  if (key && std::fabs(v) > kPadDeadZone &&
+      (key == Load32(base, g_build->right_x_name) || key == Load32(base, g_build->right_y_name))) {
+    g_last_pad.store(Now(), std::memory_order_relaxed);
+    g_d_pad_axis.fetch_add(1, std::memory_order_relaxed);
+  }
+  g_client_axis_orig(ctx, base);
+}
+
+// One-shot diagnostics: 6 lines at about 5 s intervals after the first entry call, whatever ue3_mouse_log says.
+inline void Diag() {
+  static int64_t next = 0;
+  static int left = 6;
+  if (left <= 0) return;
+  const int64_t now = Now();
+  const int64_t step = std::chrono::steady_clock::duration(std::chrono::seconds(5)).count();
+  if (!next) { next = now + step; return; }
+  if (now < next) return;
+  next = now + step;
+  --left;
+  REXLOG_INFO("ue3_mouse_look diag: entry calls {} viewports {} viewport {:08X} client {:08X} vtable {:08X} fn {:08X} | "
+              "mouse moves {} banked {} no-window {} no-capture {} not-mouse-look {} | taken {} names-not-made {} "
+              "sent {} no-fn {} | pad-axis {} names-bad {}",
+              g_d_entry_calls.load(), g_d_count, g_d_viewport, g_d_client, g_d_vt, g_d_fn, g_d_moves.load(),
+              g_d_banked.load(), g_d_no_window.load(), g_d_no_capture.load(), g_d_not_look.load(), g_d_taken.load(),
+              g_d_names_wait.load(), g_d_sent.load(), g_d_no_fn.load(), g_d_pad_axis.load(), g_names_bad.load());
 }
 
 }  // namespace detail
@@ -329,14 +404,13 @@ inline void Install(const Build& b, rex::ui::Window* window) {
   const char* why = nullptr;
   if (!rt || !d || !base || !window) why = "runtime, dispatcher, memory or window missing";
   else if (b.check_slot && Load32(base, b.check_slot) != b.check_fn) why = "table entry check failed (another build?)";
-  PPCFunc *entry = nullptr, *axis = nullptr, *friction = nullptr, *pad = nullptr;
+  PPCFunc *entry = nullptr, *axis = nullptr, *friction = nullptr;
   if (!why) {
     entry = d->GetFunction(b.entry_fn);
     axis = b.player_axis_fn ? d->GetFunction(b.player_axis_fn) : nullptr;
     friction = b.friction_fn ? d->GetFunction(b.friction_fn) : nullptr;
-    pad = b.pad_state_fn ? d->GetFunction(b.pad_state_fn) : nullptr;
-    // Gears 2 needs the axis accumulate hook; Gears 1 the XInput state hook in its place.
-    const bool pad_ok = b.pad_state_fn ? pad != nullptr : axis != nullptr;
+    // Gears 2 needs the axis accumulate hook; Gears 1 (viewports_off) hooks the client's InputAxis later instead.
+    const bool pad_ok = b.viewports_off ? true : axis != nullptr;
     if (!entry || (b.gears2 && (!pad_ok || !friction))) why = "a game function is missing";
   }
   if (!why) {
@@ -345,16 +419,17 @@ inline void Install(const Build& b, rex::ui::Window* window) {
     g_entry_orig = entry;
     g_axis_orig = axis;
     g_friction_orig = friction;
-    g_pad_orig = pad;
-    bool ok = d->SetFunction(b.entry_fn, b.gears2 ? &ProcessInputHook : &ViewportAxisHook);
+    PPCFunc* hook = !b.gears2 ? &ViewportAxisHook : b.viewports_off ? &ClientTickHook : &ProcessInputHook;
+    bool ok = d->SetFunction(b.entry_fn, hook);
     if (ok && b.gears2) {
-      ok = b.pad_state_fn ? d->SetFunction(b.pad_state_fn, &PadStateHook) : d->SetFunction(b.player_axis_fn, &AxisHook);
+      if (axis) ok = d->SetFunction(b.player_axis_fn, &AxisHook);
       ok = ok && d->SetFunction(b.friction_fn, &FrictionHook);
     }
+    // The hook must be what an indirect call to entry_fn now finds (v1's Gears 1 entry was only called directly).
+    if (ok && d->GetFunction(b.entry_fn) != hook) REXLOG_WARN("ue3_mouse_look: entry {:08X} does not resolve to the hook", b.entry_fn);
     if (!ok) {
       d->SetFunction(b.entry_fn, entry);
       if (axis) d->SetFunction(b.player_axis_fn, axis);
-      if (pad) d->SetFunction(b.pad_state_fn, pad);
       if (friction) d->SetFunction(b.friction_fn, friction);
       why = "hook install failed";
     }
