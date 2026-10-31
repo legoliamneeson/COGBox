@@ -21,7 +21,7 @@
 // release (games: bit per GameId - 1 Gears 2, 2 Gears 3, 4 Judgment, 8 Gears 1; 15 = all).
 struct HelpTest { unsigned games; const char *text; };
 static const HelpTest k_helpTest[] = {
-    { 2,  "Sudden death / \"cursed\" save (#55, #79, #80): if it happens to you, play to a checkpoint, save and quit, resume and play on until it happens, then send a problem report (and your saves from before and after, if you can). This version logs every save file the game writes, so your report shows what went wrong." },
+    { 2,  "Sudden death / \"cursed\" save, or a teammate killing you (#55, #68, #79, #80): if it happens to you, play to a checkpoint, save and quit, resume and play on until it happens, then send a problem report (and your saves from before and after, if you can). This version logs every save file the game writes, so your report shows what went wrong." },
     { 2,  "Raam's Shadow DLC not found (#79): if the game sometimes needs a restart or two before it sees the DLC, send a problem report from a start where it didn't." },
     { 15, "Other versions of the game (regional discs, other title updates): if yours isn't the one COGBox expects, tell us whether it works." },
 };
