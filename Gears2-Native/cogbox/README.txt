@@ -77,7 +77,8 @@ DLC and mods: a game's About tab (Downloadable content, Mods).
 
 System Link - LAN play (experimental, Gears of War 2 for now)
 -------------------------------------------------------------
-Play the game's System Link modes (co-op, Horde, versus) with other PCs on your network. Thanks to
+Play the game's System Link modes with other PCs on your network. Campaign co-op has been tested;
+Horde and versus have not yet - please try them and tell us. Thanks to
 HubertFer, whose patch made this possible.
 1. Every PC needs COGBox 0.3.5 or newer and its own copy of the game.
 2. Put the PCs on the same network - the same home router, or a LAN VPN such as Radmin VPN,
@@ -86,11 +87,13 @@ HubertFer, whose patch made this possible.
 3. On each PC: Gears of War 2 > Settings > Gameplay > tick "System Link - LAN play".
 4. Start the game. On one PC host (for co-op: Campaign > Co-op > Host, then set the party to
    System Link). On the other PC choose Join (System Link) and pick that game.
-5. If Windows asks about the firewall, allow Private networks.
+5. If Windows asks about the firewall, allow it. Radmin VPN and Hamachi networks are often marked
+   "Public" by Windows: set that network to Private (Windows Settings > Network) or allow Public
+   too, or the other PC's game won't show up.
 6. Co-op: the joining player presses RT ("Press RT to begin") to take over Dom.
-If the other PC's game is not listed (some VPNs drop the "find games" messages), add the other PC's
-address on its own line in extra-args.txt in the COGBox folder (make the file if it isn't
-there), for example: --net_peer_ip=26.10.20.30
+If the other PC's game is not listed (some VPNs drop the "find games" messages), add the other PCs'
+addresses on one line in extra-args.txt in the COGBox folder on EACH PC (make the file if it isn't
+there; commas between several PCs), for example: --net_peer_ip=26.10.20.30,26.10.20.31
 Not yet: voice chat; hosting from Linux / Steam Deck (joining should work). With the box off the
 game works exactly as before. Please tell us how it goes in GitHub issue #72.
 
