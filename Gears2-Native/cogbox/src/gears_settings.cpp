@@ -449,6 +449,7 @@ Availability can(Game g, const std::string& f, Version ver, const Environment& e
     } else if (f == "syslink") {   // 0.3.5: SDK patch 49b (the runtime's net_system_link); Gears 2 first
         if (!cap_rt(env, "net_system_link")) return no(not_yet(gi, "needs its next build"));
         if (g != Game::Gears2) return no(not_yet(gi, "System Link is being tested in Gears 2 first"));
+        if (ver != Version::TitleUpdate) return no("System Link is for the Title Update version only.");   // Shagg 15:53
     } else if (f == "framecap") {
         if (g == Game::Gears1 && !cap_exe(env, "gow1_max_fps")) return no(not_yet(gi, "needs its next build"));
     } else if (f == "lang") {   // the SDK runtime's --user_language / --user_country
