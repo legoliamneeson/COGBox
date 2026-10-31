@@ -264,7 +264,24 @@ void GowjInstallLoadingClamp() {
 void GowjMaxTickRate(PPCRegister& f1) {  // after `lfs f1,0x4CC(r3)` at 0x8255E220: f1 = the engine's limit (fps)
   TickTimeline();
   const int32_t cap = REXCVAR_GET(gowj_loading_fps);
-  if (cap > 0 && LoadingClampActive() && (f1.f64 <= 0.0 || f1.f64 > double(cap))) f1.f64 = double(cap);
+  // GitHub #77 (report 20261031-105629): every change of the engine's own limit is logged, so a report names it.
+  static std::atomic<int32_t> s_last_engine{-1000};
+  const int32_t engine = int32_t(f1.f64 + 0.5);
+  if (const int32_t was = s_last_engine.exchange(engine); was != engine && was != -1000)
+    REXLOG_INFO("gowj_max_fps: engine limit {} -> {} fps", was, engine);
+  if (cap > 0 && LoadingClampActive()) {
+    if (f1.f64 <= 0.0 || f1.f64 > double(cap)) f1.f64 = double(cap);
+    return;
+  }
+  // GitHub #77: outside a loading screen the game may lower its own limit (30) and keep it; the player's limit wins.
+  const int32_t want = REXCVAR_GET(gowj_max_fps);
+  if (want != 0 && f1.f64 > 0.0 && f1.f64 < (want < 0 ? 1000.0 : double(want)) - 0.5) {
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true))
+      REXLOG_INFO("gowj_max_fps: the game lowered its limit to {:.0f} fps outside a loading screen - held at {} (GitHub #77)",
+                  f1.f64, want < 0 ? 1000 : want);
+    f1.f64 = want < 0 ? 0.0 : double(want);
+  }
 }
 
 // ---- Engine settings through the game's own config (layer 2 --ue3_ini_edits) ----------------------------------------
