@@ -205,6 +205,26 @@ static const char *sdk_key_name(ImGuiKey k)
     }
 }
 
+// The game's keyboard driver (rexglue ui/sdl_virtual_key.cpp) identifies keys by SDL scancode, i.e. by their position on
+// a US layout, while Dear ImGui names them by the character they type (SDL keycode). On AZERTY / QWERTZ / other layouts
+// those differ (AZERTY "A" is the US "Q" position, QWERTZ Y/Z swap, AZERTY ";" sits at the US "," position), so the
+// pressed key is named here from its scancode, the same way the driver will see it.
+int g_lastKeyScancode = 0;
+static const char *sdk_scancode_name(int sc)
+{
+    static char one[2];
+    if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) { one[0] = char('A' + (sc - SDL_SCANCODE_A)); one[1] = 0; return one; }
+    if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9) { one[0] = char('1' + (sc - SDL_SCANCODE_1)); one[1] = 0; return one; }
+    switch (sc) {
+    case SDL_SCANCODE_0: return "0";
+    case SDL_SCANCODE_SEMICOLON: return "Semicolon"; case SDL_SCANCODE_EQUALS: return "Plus"; case SDL_SCANCODE_COMMA: return "Comma";
+    case SDL_SCANCODE_MINUS: return "Minus"; case SDL_SCANCODE_PERIOD: return "Period"; case SDL_SCANCODE_SLASH: return "Slash";
+    case SDL_SCANCODE_GRAVE: return "Backtick"; case SDL_SCANCODE_LEFTBRACKET: return "LBracket"; case SDL_SCANCODE_BACKSLASH: return "Backslash";
+    case SDL_SCANCODE_RIGHTBRACKET: return "RBracket"; case SDL_SCANCODE_APOSTROPHE: return "Quote";
+    default: return nullptr;   // everything else: ImGui's name already matches the driver's
+    }
+}
+
 static std::string key_shown(const std::string &v)   // "MMB,Z" -> "Middle mouse / Z"
 {
     std::string out, tok;
@@ -304,6 +324,8 @@ static void keys_section(App &a)
         else if (ImGui::IsMouseClicked(2)) name = "MMB";
         for (int k = ImGuiKey_NamedKey_BEGIN; !name && k < ImGuiKey_NamedKey_END; k++)
             if (ImGui::IsKeyPressed((ImGuiKey)k, false)) name = sdk_key_name((ImGuiKey)k);
+        if (name && strcmp(name, "LMB") && strcmp(name, "RMB") && strcmp(name, "MMB"))
+            if (const char *pos = sdk_scancode_name(g_lastKeyScancode)) name = pos;   // by position, as the driver sees it
         if (name) {
             // Players reported mixed-up binds: one key bound to two actions pressed both. A key now belongs to one action:
             // taken from any other action that had it (an action left with no key says so). WASD and the arrows move and
