@@ -967,6 +967,7 @@ std::vector<std::string> build_args(Game g, Version ver, const Settings& s, cons
     // job 523: under Wine / Proton the compositor (gamescope on a Steam Deck) owns the screen - no exclusive fullscreen
     if (s.i("Fullscreen") >= 1) { a.push_back("--fullscreen=true"); if (s.i("Fullscreen") == 2 && !env.wine) a.push_back("--fullscreen_exclusive=true"); }
     else {
+        a.push_back("--fullscreen=false");   // GitHub #81/#67: the ports default to full screen; windowed must say so
         int w = std::max(0, std::min(5, s.i("WindowSize")));
         if (w > 0) { a.push_back("--window_width=" + std::to_string(k_winSizes[w][0])); a.push_back("--window_height=" + std::to_string(k_winSizes[w][1])); }
     }
