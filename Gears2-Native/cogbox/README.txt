@@ -77,27 +77,59 @@ DLC and mods: a game's About tab (Downloadable content, Mods).
 
 System Link - LAN play (experimental; Title Update versions of all four games)
 -------------------------------------------------------------------------------
-Play the games' System Link modes with other PCs on your network. Gears of War 2 campaign co-op has
-been tested; its other modes and Gears of War, Gears of War 3 and Judgment have not been yet -
-please try them and tell us. Thanks to
-HubertFer, whose patch made this possible.
-1. Every PC needs COGBox 0.3.5 or newer and its own copy of the game.
-2. Put the PCs on the same network - the same home router, or a LAN VPN such as Radmin VPN,
-   ZeroTier or Hamachi for friends far away. Internet VPNs such as NordVPN do not link PCs: turn
-   them off while you play.
-3. On each PC: the game > Settings > Gameplay > tick "System Link - LAN play" (Gears 2 and 3:
-   Title Update version).
-4. Start the game. On one PC host (for co-op: Campaign > Co-op > Host, then set the party to
-   System Link). On the other PC choose Join (System Link) and pick that game.
-5. If Windows asks about the firewall, allow it. Radmin VPN and Hamachi networks are often marked
-   "Public" by Windows: set that network to Private (Windows Settings > Network) or allow Public
-   too, or the other PC's game won't show up.
-6. Gears 2 co-op: the joining player presses RT ("Press RT to begin") to take over Dom.
-If the other PC's game is not listed (some VPNs drop the "find games" messages), add the other PCs'
-addresses on one line in extra-args.txt in the COGBox folder on EACH PC (make the file if it isn't
-there; commas between several PCs), for example: --net_peer_ip=26.10.20.30,26.10.20.31
+Play the games' System Link modes (co-op and the other System Link modes) with other PCs - in the
+same house, or over the internet with a free "LAN VPN". Thanks to HubertFer, whose patch made this
+possible. Tested so far: Gears of War 2 campaign co-op. Gears of War 2's other modes and Gears of
+War, Gears of War 3 and Judgment have not been tested yet - please try them and tell us (GitHub
+issue #72).
+
+What every player needs
+- COGBox 0.3.5 or newer and your own copy of the game.
+- The game's Title Update version (Gears 2 and 3: Settings > Gameplay > Game version = Title Update).
+  Every player must use the same game.
+- Turn OFF internet VPNs such as NordVPN, ExpressVPN or Surfshark while you play. They do not link
+  PCs together, and they can make System Link use the wrong network.
+
+A. PCs in the same house (same router / Wi-Fi)
+1. On every PC: the game > Settings > Gameplay > tick "System Link - LAN play".
+2. Start the game on every PC. The first time, Windows may ask whether to allow the game through
+   the firewall: tick "Private networks" and allow it.
+3. One player hosts. Gears 2 co-op: Campaign > Co-op > Host, then in the lobby set the party type
+   to "System Link".
+4. The other player picks Join (System Link) and chooses the host's game from the list.
+5. Gears 2 co-op: the joining player presses RT ("Press RT to begin") to take over Dom.
+
+B. Friends in another house (over the internet, with Radmin VPN)
+Radmin VPN is free and makes your PCs act as if they were on one home network. ZeroTier and Hamachi
+work the same way; the steps below use Radmin VPN.
+1. Every player: download Radmin VPN from its official website (radmin-vpn.com) and install it.
+2. ONE player (the host): open Radmin VPN > Network > Create network. Type a network name and a
+   password, and send both to your friends.
+3. Every other player: Radmin VPN > Network > Join network, and type that name and password. You
+   should now see each other's PCs in Radmin VPN, each with a green dot and an address that
+   starts with 26. (for example 26.10.20.30). Write down the host's 26.x address.
+4. Every player: make the Radmin network "Private" in Windows. Windows often marks it "Public",
+   which hides the game. Windows 11: Settings > Network & internet > Advanced network settings >
+   the Radmin VPN adapter > Network profile type: Private. (Windows 10: Settings > Network &
+   Internet > Ethernet > Radmin VPN > Private.) If you can't change it, allow the game on
+   Public networks when Windows asks.
+5. Every player: the game > Settings > Gameplay > tick "System Link - LAN play".
+6. Start the game, host and join exactly as in A, steps 2-5.
+7. If the joining player does not see the host's game after 10-20 seconds, tell each game the other
+   PCs' Radmin addresses: on EACH PC open (or create) the file extra-args.txt in the COGBox folder
+   (next to CogBox.exe) and add one line with the OTHER players' addresses, commas between several:
+       --net_peer_ip=26.10.20.30
+   Save it, restart the game and try again.
+
+If it doesn't work
+- Can't select System Link / "No Network Connection": the box in step 1 is not ticked, or this is
+  the Disc version of Gears 2 or 3 (System Link is for the Title Update versions).
+- The host's game never shows up: check the firewall (Private network, game allowed), that both of
+  you are in the same Radmin network (green dots), that internet VPNs are off, then try step B7.
+- Please send a problem report (the game's About tab) from BOTH PCs to GitHub issue #72 - it lists
+  System Link and helps us fix it.
 Not yet: voice chat; hosting from Linux / Steam Deck (joining should work). With the box off the
-game works exactly as before. Please tell us how it goes in GitHub issue #72.
+game works exactly as before.
 
 Linux and Steam Deck (Proton) - experimental
 ---------------------------------------------
