@@ -1,5 +1,7 @@
 // Layer 0 unit tests: 4x prompt overlay compositor, multi-controller & procedural keycap pre-allocation, Chainsaw Duel
 // clear_box vs draw_rect semantics, and zero-hitch style switching in TextureCache.
+// Contributed by Flippage (COGBox PR #117); portions from gow3-recomp: BSD-3-Clause, Copyright (c) Flippage and the
+// gow3-recomp contributors (THIRD_PARTY_NOTICES.md). The rest is our code (MIT).
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -123,6 +125,7 @@ TEST_CASE("PromptOverlayCompositor pre-composes 4x overlays for all device style
   PromptOverlayCompositor compositor;
   REQUIRE(compositor.Initialize("assets/glyphs"));
   CHECK(compositor.IsInitialized());
+  compositor.SetMaxResidentStyles(7);  // this test looks at every style at once
 
   const DeviceStyle kActiveStyles[] = {
       DeviceStyle::kXbox,       DeviceStyle::kPlayStation,     DeviceStyle::kSwitch,
@@ -161,6 +164,7 @@ TEST_CASE("PromptOverlayCompositor produces distinct controller & keyboard art w
           "[layer0][prompt][compositor]") {
   PromptOverlayCompositor compositor;
   REQUIRE(compositor.Initialize("assets/glyphs"));
+  compositor.SetMaxResidentStyles(7);  // the spans below must all stay valid
 
   const uint64_t g3_hud = 0xa000624a174e08baULL;
   const uint64_t g3_font = 0xae5c68a9d7f7398cULL;
@@ -280,6 +284,37 @@ TEST_CASE("Chainsaw Duel overlay clears full box for B and Y cells and preserves
       CHECK(drawn_inside > 0);
     }
   }
+}
+
+TEST_CASE("PromptOverlayCompositor builds a style only when needed and keeps at most the resident limit",
+          "[layer0][prompt][compositor]") {
+  PromptOverlayCompositor compositor;
+  REQUIRE(compositor.Initialize("assets/glyphs"));
+  // Initialize decodes nothing: no style is ready until asked for.
+  CHECK(compositor.IsStyleReady(DeviceStyle::kOriginal));
+  CHECK_FALSE(compositor.IsStyleReady(DeviceStyle::kXbox));
+  CHECK_FALSE(compositor.IsStyleReady(DeviceStyle::kKeyboard));
+
+  REQUIRE(compositor.PrepareStyle(DeviceStyle::kKeyboard));
+  REQUIRE(compositor.PrepareStyle(DeviceStyle::kPlayStation));
+  CHECK(compositor.IsStyleReady(DeviceStyle::kKeyboard));
+  CHECK(compositor.IsStyleReady(DeviceStyle::kPlayStation));
+  CHECK_FALSE(compositor.IsStyleReady(DeviceStyle::kSwitch));
+
+  // A third style drops the least recently used one (default limit 2) ...
+  REQUIRE(compositor.PrepareStyle(DeviceStyle::kSwitch));
+  CHECK_FALSE(compositor.IsStyleReady(DeviceStyle::kKeyboard));
+  CHECK(compositor.IsStyleReady(DeviceStyle::kPlayStation));
+  CHECK(compositor.IsStyleReady(DeviceStyle::kSwitch));
+
+  // ... unless someone (the texture cache) still holds its buffer: then the same buffer comes back.
+  const uint64_t g3_hud = 0xa000624a174e08baULL;
+  const auto held = compositor.GetOverlayShared(g3_hud, DeviceStyle::kPlayStation);
+  REQUIRE(held);
+  REQUIRE(compositor.PrepareStyle(DeviceStyle::kKeyboard));
+  REQUIRE(compositor.PrepareStyle(DeviceStyle::kSteamDeck));
+  CHECK_FALSE(compositor.IsStyleReady(DeviceStyle::kPlayStation));
+  CHECK(compositor.GetOverlayShared(g3_hud, DeviceStyle::kPlayStation) == held);
 }
 
 TEST_CASE("SetActiveStyle integrates with TextureCache and reuses cached host handles with zero hitching",

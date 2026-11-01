@@ -1,22 +1,31 @@
-// Layer 0 (game-free): multi-hardware controller identification (Xbox, PlayStation, Switch, Steam Deck,
-// Steam Controller), keyboard/mouse vs gamepad activity monitor with mouse deadzone & debounce, and live
-// auto-switching of 4x prompt overlays in TextureCache.
+// Layer 0 (game-free): which button prompts to show. Identifies the pad in use (Xbox, PlayStation, Switch, Steam Deck,
+// Steam Controller), tells keyboard/mouse use from pad use (mouse dead zone, debounce) and switches the 4x prompt
+// overlays live (--gow_button_prompts=auto, the default).
+// Contributed by Flippage (COGBox PR #117); portions from gow3-recomp: BSD-3-Clause, Copyright (c) Flippage and the
+// gow3-recomp contributors (THIRD_PARTY_NOTICES.md). The rest is our code (MIT).
+//
+// Threads: all hardware polling (XInput / InputSystem pad reads, RawInput and SDL device scans) and all atlas building
+// happen on the monitor's own thread (Start / Stop). Window input events arrive on the UI thread. The render thread
+// only reads PublishedStyle() - one atomic load.
 #pragma once
 
 #include <atomic>
 #include <bitset>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include <rex/cvar.h>
 #include <xenos/renderer/prompt_overlay_compositor.h>
 
 REXCVAR_DECLARE(std::string, gow_button_prompts);
 REXCVAR_DECLARE(std::string, gow2_button_prompts);
+REXCVAR_DECLARE(bool, gow_button_prompts_keep_pad);
 
 namespace rex::ui {
 class Window;
@@ -34,8 +43,10 @@ using ::xenos::renderer::prompt::DeviceStyleName;
 class PromptDeviceMonitor {
  public:
   static constexpr int32_t kMouseMoveDeadzonePx = 5;
-  static constexpr uint64_t kDebounceWindowMs = 250;
-  static constexpr uint64_t kPollIntervalMs = 50;
+  static constexpr uint64_t kDebounceWindowMs = 250;   // notes/79: the cross-device debounce
+  static constexpr uint64_t kKbmRecentMs = 300;        // a key / click counts as "in use" this long
+  static constexpr uint64_t kPadPollMs = 16;           // monitor thread: pad reads
+  static constexpr uint64_t kHardwareScanMs = 2000;    // monitor thread: RawInput / SDL device classification
 
   PromptDeviceMonitor();
   ~PromptDeviceMonitor();
@@ -45,20 +56,18 @@ class PromptDeviceMonitor {
   DeviceStyle ClassifyGamepad(int sdl_type, uint16_t vid, uint16_t pid, std::string_view name,
                               bool steam_deck_env = false) const;
 
-  // Parses a user cvar mode string ("auto", "xbox", "playstation", "switch", "steamdeck", "steamcontroller",
-  // "keyboard", "original"). Returns std::nullopt for "auto" or unrecognized strings.
+  // Parses a mode string ("auto", "xbox", "playstation", "switch", "steamdeck", "steamcontroller", "keyboard",
+  // "original"). Returns std::nullopt for "auto" or unrecognized strings.
   static std::optional<DeviceStyle> ParseModeOption(std::string_view mode);
 
   // Checks if the process is running in a Steam Deck environment (SteamDeck=1 or STEAM_DECK=1).
   static bool IsSteamDeckEnvironment();
 
-  // Resets activity timestamps, detected hardware state, and debounce state back to defaults.
+  // Resets activity timestamps, detected hardware state, and debounce state; re-reads the cvars.
   void Reset();
 
-  // Records keyboard button or mouse button/wheel activity at `timestamp_ms`.
+  // Keyboard / mouse activity (UI thread: window events).
   void NotifyKeyboardMouseActivity(uint64_t timestamp_ms = 0);
-
-  // Records key down / up and mouse down / up for tracking active KBM engagement.
   void NotifyKeyDown(uint64_t timestamp_ms = 0);
   void NotifyKeyDown(uint32_t vk, uint64_t timestamp_ms = 0);
   void NotifyKeyUp(uint64_t timestamp_ms = 0);
@@ -66,89 +75,89 @@ class PromptDeviceMonitor {
   void NotifyMouseDown(uint64_t timestamp_ms = 0);
   void NotifyMouseUp(uint64_t timestamp_ms = 0);
   void ResetInputStates();
-
-  // Checks whether the player is actively pressing keys/mouse or was recently using KBM.
-  bool IsKeyboardMouseInUse(uint64_t now_ms = 0) const;
-
-  // Records mouse movement delta `(dx, dy)` at `timestamp_ms`. Only triggers KBM activity when
-  // `std::abs(dx) > 5 || std::abs(dy) > 5` (5-pixel deadzone).
+  // Only counts mouse movement beyond kMouseMoveDeadzonePx.
   void NotifyMouseMove(int32_t dx, int32_t dy, uint64_t timestamp_ms = 0);
 
-  // Records physical gamepad button/trigger/stick activity for a classified controller profile at `timestamp_ms`.
+  // Is the player pressing keys / mouse buttons, or did so in the last kKbmRecentMs? Held keys and buttons are only
+  // checked with GetAsyncKeyState while the game window is in front (a click in another app is not the game's).
+  bool IsKeyboardMouseInUse(uint64_t now_ms = 0) const;
+
+  // Pad activity for a classified pad.
   void NotifyGamepadActivity(DeviceStyle pad_style, uint64_t timestamp_ms = 0);
-
-  // Updates the default controller profile when a gamepad is enumerated before any input event is pressed.
+  // The pad that is connected, before any of its buttons is pressed.
   void SetDefaultGamepadStyle(DeviceStyle pad_style);
-
-  // Returns the current or detected gamepad style (PlayStation, Switch, Steam Deck, Steam Controller, Xbox).
   DeviceStyle GetDefaultGamepadStyle() const;
 
-  // Evaluates the target DeviceStyle at `now_ms`, honoring cvar overrides ("gow_button_prompts" /
-  // "gow2_button_prompts") and the 250 ms cross-device debounce window. Also syncs GlobalPromptCompositor().
-  DeviceStyle EvaluateActiveStyle(uint64_t now_ms = 0) const;
-
-  DeviceStyle GetActiveStyle(uint64_t now_ms = 0) const { return EvaluateActiveStyle(now_ms); }
-
-  // Polls connected SDL3 / XInput hardware, checks cvars & keybinds, and updates GlobalPromptCompositor().
-  // Throttled internally to run hardware queries at most once every 50 ms unless `force` is true or a cvar / input
-  // notification arrived since the last poll.
+  // Decides the style at `now_ms` (cvar override, else auto with the debounce) and applies it to
+  // GlobalPromptCompositor() on the calling thread. Tests and tools; the game's monitor thread does this itself.
+  DeviceStyle EvaluateActiveStyle(uint64_t now_ms = 0);
+  DeviceStyle GetActiveStyle(uint64_t now_ms = 0) { return EvaluateActiveStyle(now_ms); }
+  // Re-reads the cvars, then EvaluateActiveStyle (rebuilding the key caps if the keybind cvars changed).
   DeviceStyle Poll(uint64_t now_ms = 0, bool force = false);
 
-  // Lightweight entry point called from TextureCache::Bind(). Applies cvar overrides and live input switches
-  // without clobbering direct PromptOverlayCompositor::SetActiveStyle() calls in headless unit tests.
-  void PollFromBind();
+  // The style last applied to the compositor. Render thread safe: one relaxed atomic load, nothing else.
+  DeviceStyle PublishedStyle() const noexcept { return published_style_.load(std::memory_order_relaxed); }
+  // Kept for TextureCache::Bind's call: the same single atomic load (no polling, no locks).
+  DeviceStyle PollFromBind() const noexcept { return PublishedStyle(); }
 
-  void SetHardwarePollingEnabled(bool enabled) { hardware_polling_enabled_.store(enabled, std::memory_order_relaxed); }
-  bool IsHardwarePollingEnabled() const { return hardware_polling_enabled_.load(std::memory_order_relaxed); }
+  // Game: starts the monitor thread (UI thread, once the window and input system exist). With
+  // --gow_button_prompts=original nothing is started and nothing is ever drawn over the game's prompts.
+  void Start(rex::ui::Window* window, rex::input::InputSystem* input_system);
+  void Stop();
 
-  // Attaches/detaches rex::input::InputSystem to poll live controllers (DualSense, DualShock, Switch, Steam Deck, Xbox).
   void AttachInputSystem(rex::input::InputSystem* input_system);
   void DetachInputSystem(rex::input::InputSystem* input_system = nullptr);
-
-  // Win32 RawInput device scan for connected gamepad hardware styles (PlayStation, Switch, Steam Deck, Steam Controller, Xbox).
-  static std::optional<DeviceStyle> DetectConnectedRawInputPadStyle();
-
-  // Attaches/detaches a WindowInputListener on the game window to track KBM events.
   void AttachWindow(rex::ui::Window* window);
   void DetachWindow(rex::ui::Window* window = nullptr);
+
+  // Win32 RawInput device scan for connected gamepad hardware styles. Monitor thread / tests only (it is slow).
+  static std::optional<DeviceStyle> DetectConnectedRawInputPadStyle();
+  // RawInput, then SDL3's gamepad list (type / VID / PID / name; no gamepad is opened). Monitor thread / tests only.
+  std::optional<DeviceStyle> ScanConnectedPadStyle() const;
 
   // Steady clock timestamp in milliseconds.
   static uint64_t NowMs();
 
  private:
   class WindowWatcher;
+  enum class Mode : uint8_t { kAuto, kForced, kOriginal };
 
-  DeviceStyle DefaultGamepadStyleLocked() const;
-  std::optional<DeviceStyle> ResolveForcedStyleLocked() const;
-  DeviceStyle EvaluateActiveStyleLocked(uint64_t now_ms) const;
-  void PollHardwareLocked(uint64_t now_ms);
+  void ReadModeLocked();
+  DeviceStyle EvaluateActiveStyleLocked(uint64_t now_ms);
+  bool HasAnyKeyDownLocked(bool check_async) const;
   std::string SnapshotKeybindSignature() const;
+  void ThreadMain();
 
   mutable std::mutex mutex_;
+  // Mode (from the cvars; read at Start / Reset / Poll, not per frame).
+  Mode mode_ = Mode::kAuto;
+  DeviceStyle forced_style_ = DeviceStyle::kOriginal;
+  bool keyboard_allowed_ = true;  // GitHub #104: false = keep the pad prompts while keyboard and mouse is on
+
+  // Activity.
   uint64_t last_kbm_ms_ = 0;
   uint64_t last_pad_ms_ = 0;
   DeviceStyle last_detected_pad_style_ = DeviceStyle::kXbox;
   bool has_detected_pad_ = false;
-  mutable DeviceStyle committed_auto_style_ = DeviceStyle::kXbox;
-  mutable bool has_committed_auto_ = false;
+  DeviceStyle committed_auto_style_ = DeviceStyle::kXbox;
+  bool has_committed_auto_ = false;
+  mutable std::bitset<256> keys_down_;
+  bool mouse_down_ = false;
 
-  mutable std::string last_gow_cvar_ = "auto";
-  mutable std::string last_gow2_cvar_ = "auto";
-  mutable std::optional<DeviceStyle> sticky_forced_style_;
-  mutable DeviceStyle last_applied_style_ = DeviceStyle::kOriginal;
-  mutable bool has_applied_style_ = false;
-
-  uint64_t last_poll_ms_ = 0;
+  // Applied state.
+  DeviceStyle last_applied_style_ = DeviceStyle::kOriginal;
+  bool last_applied_hide_ = false;
+  bool has_applied_style_ = false;
   std::string last_keybind_sig_;
-  std::atomic<bool> dirty_{false};
-  std::atomic<bool> hardware_polling_enabled_{true};
-  std::bitset<256> keys_down_;
-  std::atomic<bool> mouse_down_{false};
-  bool HasAnyKeyDownLocked() const;
+  std::atomic<DeviceStyle> published_style_{DeviceStyle::kOriginal};
 
-  rex::ui::Window* attached_window_ = nullptr;
-  rex::input::InputSystem* attached_input_system_ = nullptr;
+  // Game wiring.
+  rex::ui::Window* attached_window_ = nullptr;  // under mutex_
+  std::atomic<rex::input::InputSystem*> attached_input_system_{nullptr};
   std::unique_ptr<WindowWatcher> window_watcher_;
+  std::thread thread_;
+  std::atomic<bool> stop_{false};
+  std::condition_variable stop_cv_;
 };
 
 PromptDeviceMonitor& GlobalPromptDeviceMonitor();

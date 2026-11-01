@@ -1,5 +1,7 @@
 // Layer 0 (game-free): 4x prompt overlay compositor and pre-allocated style cache for Xbox, PlayStation, Switch,
 // Steam Deck, Steam Controller, and procedural Keyboard/Mouse keycaps.
+// Contributed by Flippage (COGBox PR #117); portions from gow3-recomp: BSD-3-Clause, Copyright (c) Flippage and the
+// gow3-recomp contributors (THIRD_PARTY_NOTICES.md). The rest is our code (MIT).
 #include <xenos/renderer/prompt_overlay_compositor.h>
 
 #include <xenos/renderer/texture_cache.h>
@@ -430,87 +432,174 @@ const char* DeviceStyleName(DeviceStyle style) {
   return "original";
 }
 
+namespace {
+
+PromptOverlayCompositor::Image CropToContent(const PromptOverlayCompositor::Image& src) {
+  int x0 = src.width, y0 = src.height, x1 = -1, y1 = -1;
+  for (int y = 0; y < src.height; ++y) {
+    for (int x = 0; x < src.width; ++x) {
+      if (src.rgba[(size_t(y) * src.width + x) * 4 + 3] > 8) {
+        x0 = std::min(x0, x);
+        y0 = std::min(y0, y);
+        x1 = std::max(x1, x);
+        y1 = std::max(y1, y);
+      }
+    }
+  }
+  if (x1 < x0) return src;
+  PromptOverlayCompositor::Image out;
+  out.width = x1 - x0 + 1;
+  out.height = y1 - y0 + 1;
+  out.rgba.resize(size_t(out.width) * out.height * 4);
+  for (int y = 0; y < out.height; ++y) {
+    std::memcpy(&out.rgba[size_t(y) * out.width * 4], &src.rgba[(size_t(y + y0) * src.width + x0) * 4],
+                size_t(out.width) * 4);
+  }
+  return out;
+}
+
+bool LoadPng(const std::filesystem::path& path, PromptOverlayCompositor::Image* out) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (bytes.empty()) return false;
+  int w = 0, h = 0, ch = 0;
+  stbi_uc* decoded = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &ch, 4);
+  if (!decoded || w <= 0 || h <= 0) {
+    if (decoded) stbi_image_free(decoded);
+    return false;
+  }
+  PromptOverlayCompositor::Image raw;
+  raw.width = w;
+  raw.height = h;
+  raw.rgba.assign(decoded, decoded + size_t(w) * h * 4);
+  stbi_image_free(decoded);
+  *out = CropToContent(raw);
+  return true;
+}
+
+const char* StyleFolder(DeviceStyle style) {
+  switch (style) {
+    case DeviceStyle::kXbox:
+      return "xbox";
+    case DeviceStyle::kPlayStation:
+      return "playstation";
+    case DeviceStyle::kSwitch:
+      return "switch";
+    case DeviceStyle::kSteamDeck:
+      return "steamdeck";
+    case DeviceStyle::kSteamController:
+      return "steamcontroller";
+    default:
+      return nullptr;
+  }
+}
+
+}  // namespace
+
+// Rework: Initialize() only finds the glyph folder - no PNG is decoded and no atlas is built here. Each style's four
+// 4x atlases are built the first time that style is needed (EnsureStyleLocked), on whichever thread asks: in the game
+// that is the prompt monitor's own thread, never the render thread.
 bool PromptOverlayCompositor::Initialize(const std::filesystem::path& glyphs_dir,
                                          const std::map<std::string, std::string>& keybind_overrides) {
   std::lock_guard<std::mutex> lock(mutex_);
   resolved_glyphs_dir_ = ResolveGlyphsDir(glyphs_dir);
-
-  auto crop_to_content = [](const Image& src) -> Image {
-    int x0 = src.width, y0 = src.height, x1 = -1, y1 = -1;
-    for (int y = 0; y < src.height; ++y) {
-      for (int x = 0; x < src.width; ++x) {
-        if (src.rgba[(size_t(y) * src.width + x) * 4 + 3] > 8) {
-          x0 = std::min(x0, x);
-          y0 = std::min(y0, y);
-          x1 = std::max(x1, x);
-          y1 = std::max(y1, y);
-        }
-      }
-    }
-    if (x1 < x0) return src;
-    Image out;
-    out.width = x1 - x0 + 1;
-    out.height = y1 - y0 + 1;
-    out.rgba.resize(size_t(out.width) * out.height * 4);
-    for (int y = 0; y < out.height; ++y) {
-      std::memcpy(&out.rgba[size_t(y) * out.width * 4], &src.rgba[(size_t(y + y0) * src.width + x0) * 4],
-                  size_t(out.width) * 4);
-    }
-    return out;
-  };
-
-  auto load_png = [&](const std::filesystem::path& path, Image* out) -> bool {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
-    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (bytes.empty()) return false;
-    int w = 0, h = 0, ch = 0;
-    stbi_uc* decoded = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &ch, 4);
-    if (!decoded || w <= 0 || h <= 0) {
-      if (decoded) stbi_image_free(decoded);
+  std::error_code ec;
+  for (DeviceStyle s : {DeviceStyle::kXbox, DeviceStyle::kPlayStation, DeviceStyle::kSwitch, DeviceStyle::kSteamDeck,
+                        DeviceStyle::kSteamController}) {
+    if (!std::filesystem::exists(resolved_glyphs_dir_ / StyleFolder(s) / "a.png", ec)) {
+      REXLOG_WARN("prompt_compositor: no glyphs in '{}' ({})", resolved_glyphs_dir_.string(), StyleFolder(s));
       return false;
     }
-    Image raw;
-    raw.width = w;
-    raw.height = h;
-    raw.rgba.assign(decoded, decoded + size_t(w) * h * 4);
-    stbi_image_free(decoded);
-    *out = crop_to_content(raw);
-    return true;
-  };
-
-  const std::pair<DeviceStyle, const char*> kControllerProfiles[] = {
-      {DeviceStyle::kXbox, "xbox"},
-      {DeviceStyle::kPlayStation, "playstation"},
-      {DeviceStyle::kSwitch, "switch"},
-      {DeviceStyle::kSteamDeck, "steamdeck"},
-      {DeviceStyle::kSteamController, "steamcontroller"},
-  };
-
-  for (const auto& [style, folder] : kControllerProfiles) {
-    std::unordered_map<std::string, Image> glyphs;
-    for (const char* btn : kCanonicalButtons) {
-      const std::filesystem::path p = resolved_glyphs_dir_ / folder / (std::string(btn) + ".png");
-      Image img;
-      if (!load_png(p, &img)) {
-        REXLOG_WARN("prompt_compositor: failed to load glyph PNG '{}'", p.string());
-        return false;
-      }
-      glyphs.emplace(btn, std::move(img));
-    }
-    ComposeControllerStyleLocked(style, glyphs);
   }
-
-  ComposeKeyboardStyleLocked(keybind_overrides);
+  keybind_overrides_ = keybind_overrides;
+  for (auto& style_slots : overlays_)
+    for (auto& slot : style_slots) slot.reset();
+  for (auto& style_slots : weak_overlays_)
+    for (auto& slot : style_slots) slot.reset();
+  resident_order_.clear();
   initialized_ = true;
-  REXLOG_INFO("prompt_compositor: initialized from '{}', active style={}",
-              resolved_glyphs_dir_.string(), DeviceStyleName(active_style_));
-
+  REXLOG_INFO("prompt_compositor: glyphs in '{}', active style={}", resolved_glyphs_dir_.string(),
+              DeviceStyleName(active_style_));
   if (active_style_ != DeviceStyle::kOriginal) {
+    EnsureStyleLocked(active_style_);
     ApplyActiveStyleLocked();
   }
   return true;
 }
+
+bool PromptOverlayCompositor::StyleResidentLocked(DeviceStyle style) const {
+  const size_t s = static_cast<size_t>(style);
+  for (int k = 0; k < kKindCount; ++k)
+    if (overlays_[s][k]) return true;
+  return false;
+}
+
+bool PromptOverlayCompositor::EnsureStyleLocked(DeviceStyle style) {
+  if (!initialized_ || style == DeviceStyle::kOriginal || static_cast<size_t>(style) >= kStyleCount) return false;
+  const size_t s = static_cast<size_t>(style);
+  if (!StyleResidentLocked(style)) {
+    // Evicted earlier but still held by the texture cache (its per-style host textures keep a reference): take it back
+    // instead of composing again, so the cache sees the same buffer and reuses its texture.
+    bool revived = true;
+    std::shared_ptr<const std::vector<uint8_t>> kept[kKindCount];
+    for (int k = 0; k < kKindCount; ++k) {
+      if (!GetLayoutForKind(static_cast<AtlasKind>(k))) continue;
+      kept[k] = weak_overlays_[s][k].lock();
+      overlays_[s][k] = kept[k];
+      if (!kept[k]) revived = false;
+    }
+    if (!revived) {
+      if (style == DeviceStyle::kKeyboard) {
+        ComposeKeyboardStyleLocked(keybind_overrides_);
+      } else {
+        std::unordered_map<std::string, Image> glyphs;
+        for (const char* btn : kCanonicalButtons) {
+          const std::filesystem::path p = resolved_glyphs_dir_ / StyleFolder(style) / (std::string(btn) + ".png");
+          Image img;
+          if (!LoadPng(p, &img)) {
+            REXLOG_WARN("prompt_compositor: failed to load glyph PNG '{}'", p.string());
+            return false;
+          }
+          glyphs.emplace(btn, std::move(img));
+        }
+        ComposeControllerStyleLocked(style, glyphs);
+      }
+      // Kinds the texture cache still holds keep their old buffer (same pointer = its cached host texture is reused).
+      for (int k = 0; k < kKindCount; ++k)
+        if (kept[k]) overlays_[s][k] = kept[k];
+      REXLOG_INFO("prompt_compositor: built the {} atlases", DeviceStyleName(style));
+    }
+    for (int k = 0; k < kKindCount; ++k) weak_overlays_[s][k] = overlays_[s][k];
+  }
+  // Most recently used last; drop the strong references of the oldest styles past the limit (never the active one).
+  resident_order_.erase(std::remove(resident_order_.begin(), resident_order_.end(), style), resident_order_.end());
+  resident_order_.push_back(style);
+  while (resident_order_.size() > max_resident_) {
+    auto victim = std::find_if(resident_order_.begin(), resident_order_.end(),
+                               [&](DeviceStyle v) { return v != active_style_ && v != style; });
+    if (victim == resident_order_.end()) break;
+    for (auto& slot : overlays_[static_cast<size_t>(*victim)]) slot.reset();
+    resident_order_.erase(victim);
+  }
+  return true;
+}
+
+bool PromptOverlayCompositor::PrepareStyle(DeviceStyle style) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return EnsureStyleLocked(style);
+}
+
+bool PromptOverlayCompositor::IsStyleReady(DeviceStyle style) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return style == DeviceStyle::kOriginal || (initialized_ && StyleResidentLocked(style));
+}
+
+void PromptOverlayCompositor::SetMaxResidentStyles(size_t count) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  max_resident_ = std::max<size_t>(count, 1);
+}
+
 
 void PromptOverlayCompositor::ComposeControllerStyleLocked(DeviceStyle style,
                                                            const std::unordered_map<std::string, Image>& glyphs) {
@@ -660,18 +749,6 @@ const AtlasLayout* PromptOverlayCompositor::ResolveLayoutLocked(uint64_t hash) c
   return nullptr;
 }
 
-std::span<const uint8_t> PromptOverlayCompositor::GetOverlay(uint64_t hash, DeviceStyle style) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!initialized_ || style == DeviceStyle::kOriginal || static_cast<size_t>(style) >= kStyleCount) {
-    return {};
-  }
-  const AtlasLayout* layout = ResolveLayoutLocked(hash);
-  if (!layout) return {};
-  const auto& ptr = overlays_[static_cast<size_t>(style)][static_cast<size_t>(layout->kind)];
-  if (!ptr) return {};
-  return std::span<const uint8_t>(ptr->data(), ptr->size());
-}
-
 std::shared_ptr<const std::vector<uint8_t>> PromptOverlayCompositor::GetOverlayShared(uint64_t hash,
                                                                                       DeviceStyle style) const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -680,12 +757,23 @@ std::shared_ptr<const std::vector<uint8_t>> PromptOverlayCompositor::GetOverlayS
   }
   const AtlasLayout* layout = ResolveLayoutLocked(hash);
   if (!layout) return nullptr;
+  // Built on demand (tests and tools); the game prepares its styles on the monitor thread.
+  if (!const_cast<PromptOverlayCompositor*>(this)->EnsureStyleLocked(style)) return nullptr;
   return overlays_[static_cast<size_t>(style)][static_cast<size_t>(layout->kind)];
 }
 
+std::span<const uint8_t> PromptOverlayCompositor::GetOverlay(uint64_t hash, DeviceStyle style) const {
+  const auto ptr = GetOverlayShared(hash, style);
+  if (!ptr) return {};
+  // Valid while the style stays resident (see SetMaxResidentStyles).
+  return std::span<const uint8_t>(ptr->data(), ptr->size());
+}
+
 void PromptOverlayCompositor::ApplyActiveStyleLocked() {
+  // Disk overlays (the launcher's key caps, --gow2_texture_overlay_dir) are hidden only when auto mode asked for the
+  // game's own prompts; an explicit "original" leaves them exactly as before this feature.
+  SetSuppressDiskOverlaysForPrompts(active_style_ == DeviceStyle::kOriginal && hide_disk_overlays_);
   if (active_style_ == DeviceStyle::kOriginal) {
-    SetSuppressDiskOverlaysForPrompts(true);
     for (const auto& layout : GetAllAtlasLayouts()) {
       SetDynamicOverlayShared(layout.hash, nullptr);
     }
@@ -695,31 +783,37 @@ void PromptOverlayCompositor::ApplyActiveStyleLocked() {
     return;
   }
 
-  SetSuppressDiskOverlaysForPrompts(false);
+  const size_t s = static_cast<size_t>(active_style_);
   for (const auto& layout : GetAllAtlasLayouts()) {
-    const auto& ov = overlays_[static_cast<size_t>(active_style_)][static_cast<size_t>(layout.kind)];
-    SetDynamicOverlayShared(layout.hash, ov);
+    SetDynamicOverlayShared(layout.hash, overlays_[s][static_cast<size_t>(layout.kind)]);
   }
   for (const auto& [alias_hash, target_hash] : hash_aliases_) {
     if (const AtlasLayout* layout = GetAtlasLayout(target_hash)) {
-      const auto& ov = overlays_[static_cast<size_t>(active_style_)][static_cast<size_t>(layout->kind)];
-      SetDynamicOverlayShared(alias_hash, ov);
+      SetDynamicOverlayShared(alias_hash, overlays_[s][static_cast<size_t>(layout->kind)]);
     }
   }
 }
 
-void PromptOverlayCompositor::SetActiveStyle(DeviceStyle style) {
+void PromptOverlayCompositor::SetActiveStyle(DeviceStyle style, bool hide_disk_overlays) {
   REXLOG_INFO("prompt_compositor: SetActiveStyle({})", DeviceStyleName(style));
+  bool need_init = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     active_style_ = style;
-    if (initialized_ || style == DeviceStyle::kOriginal) {
+    hide_disk_overlays_ = hide_disk_overlays;
+    if (style == DeviceStyle::kOriginal) {
       ApplyActiveStyleLocked();
       return;
     }
+    if (initialized_) {
+      EnsureStyleLocked(style);  // a no-op when the style was prepared in advance
+      ApplyActiveStyleLocked();
+      return;
+    }
+    need_init = true;
   }
-  // Auto-initialize from default glyphs path when SetActiveStyle is called before Initialize().
-  Initialize();
+  // Called before Initialize(): find the default glyph folder (this builds and applies the style).
+  if (need_init) Initialize();
 }
 
 DeviceStyle PromptOverlayCompositor::ActiveStyle() const {
@@ -729,7 +823,13 @@ DeviceStyle PromptOverlayCompositor::ActiveStyle() const {
 
 void PromptOverlayCompositor::RebuildKeyboardOverlays(const std::map<std::string, std::string>& keybind_overrides) {
   std::lock_guard<std::mutex> lock(mutex_);
-  ComposeKeyboardStyleLocked(keybind_overrides);
+  keybind_overrides_ = keybind_overrides;
+  const size_t kb = static_cast<size_t>(DeviceStyle::kKeyboard);
+  const bool was_resident = StyleResidentLocked(DeviceStyle::kKeyboard);
+  for (auto& slot : overlays_[kb]) slot.reset();
+  for (auto& slot : weak_overlays_[kb]) slot.reset();
+  if (!initialized_ || (!was_resident && active_style_ != DeviceStyle::kKeyboard)) return;
+  EnsureStyleLocked(DeviceStyle::kKeyboard);
   if (active_style_ == DeviceStyle::kKeyboard) {
     ApplyActiveStyleLocked();
   }

@@ -167,21 +167,12 @@ void PollPads() {
   HMODULE xi = LoadLibraryW(L"xinput1_4.dll");
   if (!xi) xi = LoadLibraryW(L"xinput9_1_0.dll");
   auto get = xi ? reinterpret_cast<XInputGetStateFn>(GetProcAddress(xi, "XInputGetState")) : nullptr;
-  if (!get && !g_input && !rex::Runtime::instance()) {
+  if (!get && !g_input) {
     REXLOG_WARN("cogbox_menu: no controller input found - the menu opens with F1 only");
     return;
   }
   bool combo_was = false;
   while (!g_stop.load()) {
-    if (!g_input) {
-      if (auto* rt = rex::Runtime::instance()) {
-        if (auto* input = static_cast<rex::input::InputSystem*>(rt->input_system())) {
-          g_input = input;
-          ::xenos::input::GlobalPromptDeviceMonitor().AttachInputSystem(g_input);
-          REXLOG_INFO("PollPads: dynamically acquired g_input={:p}", (void*)g_input);
-        }
-      }
-    }
     XINPUT_GAMEPAD pad = {};
     bool connected = false;
     if (g_input) {
@@ -198,8 +189,7 @@ void PollPads() {
           connected = true;
         }
       }
-    }
-    if (!connected && get) {
+    } else {
       for (DWORD i = 0; i < 4 && !connected; ++i) {
         XINPUT_STATE s = {};
         if (get(i, &s) == ERROR_SUCCESS) { pad = s.Gamepad; connected = true; }
@@ -209,74 +199,6 @@ void PollPads() {
       std::lock_guard<std::mutex> l(g_pad_mutex);
       g_pad = pad;
       g_pad_connected = connected;
-    }
-    auto& prompt_mon = ::xenos::input::GlobalPromptDeviceMonitor();
-    if (connected) {
-      const auto pad_style = prompt_mon.GetDefaultGamepadStyle();
-      const uint64_t now = ::xenos::input::PromptDeviceMonitor::NowMs();
-      const bool kbm_in_use = prompt_mon.IsKeyboardMouseInUse(now);
-
-      static int16_t prev_lx = 0, prev_ly = 0, prev_rx = 0, prev_ry = 0;
-      static bool has_prev_pad = false;
-
-      bool button_active = false;
-      if (pad.wButtons != 0 && !kbm_in_use) {
-        button_active = true;
-      }
-      if ((pad.bLeftTrigger > 40 || pad.bRightTrigger > 40) && !kbm_in_use) {
-        button_active = true;
-      }
-
-      bool stick_active = false;
-      if (!kbm_in_use) {
-        constexpr int kStickDeadzone = 14000;
-        const int alx = std::abs(static_cast<int>(pad.sThumbLX));
-        const int aly = std::abs(static_cast<int>(pad.sThumbLY));
-        const int arx = std::abs(static_cast<int>(pad.sThumbRX));
-        const int ary = std::abs(static_cast<int>(pad.sThumbRY));
-
-        if (alx > kStickDeadzone || aly > kStickDeadzone || arx > kStickDeadzone || ary > kStickDeadzone) {
-          if (has_prev_pad) {
-            const int dlx = std::abs(static_cast<int>(pad.sThumbLX) - prev_lx);
-            const int dly = std::abs(static_cast<int>(pad.sThumbLY) - prev_ly);
-            const int drx = std::abs(static_cast<int>(pad.sThumbRX) - prev_rx);
-            const int dry = std::abs(static_cast<int>(pad.sThumbRY) - prev_ry);
-            if (dlx > 2000 || dly > 2000 || drx > 2000 || dry > 2000 ||
-                alx > 20000 || aly > 20000 || arx > 20000 || ary > 20000) {
-              stick_active = true;
-            }
-          } else {
-            stick_active = true;
-          }
-        }
-      }
-
-      prev_lx = pad.sThumbLX;
-      prev_ly = pad.sThumbLY;
-      prev_rx = pad.sThumbRX;
-      prev_ry = pad.sThumbRY;
-      has_prev_pad = true;
-
-      const bool active = button_active || stick_active;
-      static uint64_t s_last_pad_log = 0;
-      if (active && (now - s_last_pad_log > 1000)) {
-        s_last_pad_log = now;
-        REXLOG_INFO("PollPads: pad active! btn=0x{:04X}, lt={}, rt={}, lx={}, ly={}, rx={}, ry={}, style={}",
-                    pad.wButtons, pad.bLeftTrigger, pad.bRightTrigger, pad.sThumbLX, pad.sThumbLY, pad.sThumbRX,
-                    pad.sThumbRY, DeviceStyleName(pad_style));
-      }
-      if (active) {
-        prompt_mon.NotifyGamepadActivity(pad_style, now);
-      } else {
-        prompt_mon.SetDefaultGamepadStyle(pad_style);
-      }
-    } else {
-      static uint64_t s_last_conn_log = 0;
-      const uint64_t now = ::xenos::input::PromptDeviceMonitor::NowMs();
-      if (now - s_last_conn_log > 3000) {
-        s_last_conn_log = now;
-        REXLOG_INFO("PollPads: no pad connected (g_input={})", (void*)g_input);
-      }
     }
     const bool combo = connected && (pad.wButtons & XINPUT_GAMEPAD_BACK) && (pad.wButtons & XINPUT_GAMEPAD_START);
     if (combo && !combo_was && !g_open.load()) RequestOpenOnUIThread();
@@ -608,11 +530,9 @@ void RequestOpenOnUIThread() {
 }  // namespace
 
 void XenosInstallInGameMenu(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window, rex::Runtime* runtime) {
-  if (window) ::xenos::input::GlobalPromptDeviceMonitor().AttachWindow(window);
-  if (runtime && runtime->input_system()) {
-    ::xenos::input::GlobalPromptDeviceMonitor().AttachInputSystem(
-        static_cast<rex::input::InputSystem*>(runtime->input_system()));
-  }
+  // PR #117: the button-prompt monitor (its own thread; nothing with --gow_button_prompts=original), menu or no menu.
+  ::xenos::input::GlobalPromptDeviceMonitor().Start(
+      window, runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr);
   if (!REXCVAR_GET(cogbox_menu_enabled) || !drawer || !window) return;
   g_drawer = drawer;
   g_window = window;
@@ -633,8 +553,8 @@ void XenosInstallInGameMenu(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* windo
 }
 
 void XenosShutdownInGameMenu() {
-  ::xenos::input::GlobalPromptDeviceMonitor().DetachInputSystem();
-  ::xenos::input::GlobalPromptDeviceMonitor().DetachWindow(g_window);
+  ::xenos::input::GlobalPromptDeviceMonitor().Stop();
+  ::xenos::input::GlobalPromptDeviceMonitor().DetachWindow(nullptr);
   AllowSetForegroundWindow(ASFW_ANY);   // 0.2.0: any other way out too (window closed, the game's own quit)
   g_stop.store(true);
   if (g_poller.joinable()) g_poller.join();

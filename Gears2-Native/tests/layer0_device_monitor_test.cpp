@@ -1,5 +1,8 @@
 // Layer 0 unit tests: multi-hardware gamepad classification (Switch, Steam Deck, Steam Controller, PlayStation, Xbox),
-// mouse deadzone (> 5 px) & 250 ms cross-device debounce, and live user cvar overrides in PromptDeviceMonitor.
+// mouse deadzone (> 5 px) & 250 ms cross-device debounce, live user cvar overrides, auto mode's Xbox = the game's own
+// prompts, and GitHub #104 (keep the pad prompts with keyboard and mouse) in PromptDeviceMonitor.
+// Contributed by Flippage (COGBox PR #117); portions from gow3-recomp: BSD-3-Clause, Copyright (c) Flippage and the
+// gow3-recomp contributors (THIRD_PARTY_NOTICES.md). The rest is our code (MIT).
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
@@ -20,11 +23,13 @@ struct ScopedPromptCvarReset {
   ScopedPromptCvarReset() {
     REXCVAR_SET(gow_button_prompts, "auto");
     REXCVAR_SET(gow2_button_prompts, "auto");
+    REXCVAR_SET(gow_button_prompts_keep_pad, false);
     GlobalPromptDeviceMonitor().Reset();
   }
   ~ScopedPromptCvarReset() {
     REXCVAR_SET(gow_button_prompts, "auto");
     REXCVAR_SET(gow2_button_prompts, "auto");
+    REXCVAR_SET(gow_button_prompts_keep_pad, false);
     GlobalPromptDeviceMonitor().Reset();
     ClearDynamicOverlays();
   }
@@ -228,4 +233,61 @@ TEST_CASE("PromptDeviceMonitor IsKeyboardMouseInUse handles autorepeat and switc
   monitor.NotifyGamepadActivity(DeviceStyle::kPlayStation, 3400);
   CHECK(monitor.EvaluateActiveStyle(3400) == DeviceStyle::kPlayStation);
   CHECK(GlobalPromptCompositor().ActiveStyle() == DeviceStyle::kPlayStation);
+}
+
+TEST_CASE("Auto mode shows the game's own prompts for an Xbox pad and switches instantly both ways",
+          "[layer0][input][device_monitor]") {
+  ScopedPromptCvarReset guard;
+  REQUIRE(GlobalPromptCompositor().Initialize("assets/glyphs"));
+  PromptDeviceMonitor monitor;
+  monitor.Reset();
+
+  // Xbox pad: no overlay at all (the game's Xbox 360 art), and nothing was built for it.
+  monitor.NotifyGamepadActivity(DeviceStyle::kXbox, 1000);
+  CHECK(monitor.EvaluateActiveStyle(1000) == DeviceStyle::kOriginal);
+  CHECK(GlobalPromptCompositor().ActiveStyle() == DeviceStyle::kOriginal);
+  CHECK(monitor.PublishedStyle() == DeviceStyle::kOriginal);
+  CHECK(monitor.PollFromBind() == DeviceStyle::kOriginal);
+
+  // A key after the debounce: key caps; a pad button after the debounce: back to the game's own.
+  monitor.NotifyKeyDown(0x57, 1500);
+  CHECK(monitor.EvaluateActiveStyle(1500) == DeviceStyle::kKeyboard);
+  CHECK(monitor.PublishedStyle() == DeviceStyle::kKeyboard);
+  monitor.NotifyKeyUp(0x57, 1510);
+  monitor.NotifyGamepadActivity(DeviceStyle::kXbox, 2000);
+  CHECK(monitor.EvaluateActiveStyle(2000) == DeviceStyle::kOriginal);
+
+  // Other pads get their own glyphs.
+  monitor.NotifyGamepadActivity(DeviceStyle::kPlayStation, 2100);
+  CHECK(monitor.EvaluateActiveStyle(2100) == DeviceStyle::kPlayStation);
+
+  // An explicit "xbox" still draws the Kenney Xbox glyphs; "original" never draws anything.
+  REXCVAR_SET(gow_button_prompts, "xbox");
+  CHECK(monitor.Poll(2200) == DeviceStyle::kXbox);
+  REXCVAR_SET(gow_button_prompts, "original");
+  CHECK(monitor.Poll(2300) == DeviceStyle::kOriginal);
+}
+
+TEST_CASE("GitHub #104: with keep-pad on, keyboard and mouse never bring the key caps in auto mode",
+          "[layer0][input][device_monitor]") {
+  ScopedPromptCvarReset guard;
+  REQUIRE(GlobalPromptCompositor().Initialize("assets/glyphs"));
+  REXCVAR_SET(gow_button_prompts_keep_pad, true);
+  PromptDeviceMonitor monitor;
+  monitor.Reset();
+
+  monitor.NotifyGamepadActivity(DeviceStyle::kPlayStation, 1000);
+  CHECK(monitor.EvaluateActiveStyle(1000) == DeviceStyle::kPlayStation);
+  monitor.NotifyKeyboardMouseActivity(2000);
+  monitor.NotifyMouseMove(40, 0, 2100);
+  CHECK(monitor.EvaluateActiveStyle(2500) == DeviceStyle::kPlayStation);
+
+  // An Xbox pad with keyboard use: still the game's own prompts, never key caps.
+  monitor.NotifyGamepadActivity(DeviceStyle::kXbox, 3000);
+  monitor.NotifyKeyboardMouseActivity(4000);
+  CHECK(monitor.EvaluateActiveStyle(4500) == DeviceStyle::kOriginal);
+
+  // An explicit "keyboard" is the player's own choice and still wins.
+  REXCVAR_SET(gow_button_prompts, "keyboard");
+  CHECK(monitor.Poll(5000) == DeviceStyle::kKeyboard);
 }

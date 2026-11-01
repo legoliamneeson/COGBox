@@ -1,11 +1,12 @@
-// Layer 0 (game-free): multi-hardware controller identification (Xbox, PlayStation, Switch, Steam Deck,
-// Steam Controller), keyboard/mouse vs gamepad activity monitor with mouse deadzone & debounce, and live
-// auto-switching of 4x prompt overlays in TextureCache.
+// Layer 0 (game-free): see xenos/input/prompt_device_monitor.h.
+// Contributed by Flippage (COGBox PR #117); portions from gow3-recomp: BSD-3-Clause, Copyright (c) Flippage and the
+// gow3-recomp contributors (THIRD_PARTY_NOTICES.md). The rest is our code (MIT).
 #include <xenos/input/prompt_device_monitor.h>
 
 #include <rex/cvar.h>
 #include <rex/input/input_system.h>
 #include <rex/logging/macros.h>
+#include <rex/runtime.h>
 #include <rex/ui/ui_event.h>
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
@@ -18,6 +19,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -30,10 +32,16 @@
 #include <Xinput.h>
 #endif
 
+// Rework of PR #117: "auto" by default, but an Xbox / XInput pad keeps the game's own prompts (no overlay); the other
+// pads get their Kenney glyphs and keyboard / mouse the key caps. "original" = never touch the prompts (as before).
 REXCVAR_DEFINE_STRING(gow_button_prompts, "auto", "Input",
-                      "Button prompt glyph style: auto, xbox, playstation, switch, steamdeck, steamcontroller, keyboard, original");
-REXCVAR_DEFINE_STRING(gow2_button_prompts, "auto", "Input",
-                      "Button prompt glyph style: auto, xbox, playstation, switch, steamdeck, steamcontroller, keyboard, original");
+                      "Button prompts: auto (Xbox pad = the game's own; PlayStation / Switch / Steam pads and keyboard "
+                      "get their own, switching live), xbox, playstation, switch, steamdeck, steamcontroller, keyboard, "
+                      "original (never change the game's prompts)");
+REXCVAR_DEFINE_STRING(gow2_button_prompts, "auto", "Input", "Alias of --gow_button_prompts (used when that one is auto)");
+// GitHub #104: the launcher's "Controller button prompts" option (keep the pad prompts with Keyboard and mouse on).
+REXCVAR_DEFINE_BOOL(gow_button_prompts_keep_pad, false, "Input",
+                    "Auto button prompts never switch to key caps (keyboard / mouse use keeps the pad's prompts)");
 
 namespace xenos::input {
 
@@ -77,50 +85,37 @@ const char* const kKeybindCvars[] = {
 };
 
 #ifdef _WIN32
+// SDL3's gamepad list, for classification only: the *ForID queries need no open gamepad, so none is ever opened (the
+// PR opened one per poll and never closed it).
 struct SdlGamepadApi {
   using SDL_JoystickID = uint32_t;
-  struct SDL_Gamepad;
-
   using GetGamepadsFn = SDL_JoystickID*(__cdecl*)(int* count);
   using FreeFn = void(__cdecl*)(void* mem);
-  using GetGamepadFromIDFn = SDL_Gamepad*(__cdecl*)(SDL_JoystickID instance_id);
-  using OpenGamepadFn = SDL_Gamepad*(__cdecl*)(SDL_JoystickID instance_id);
   using GetGamepadTypeForIDFn = int(__cdecl*)(SDL_JoystickID instance_id);
   using GetGamepadVendorForIDFn = uint16_t(__cdecl*)(SDL_JoystickID instance_id);
   using GetGamepadProductForIDFn = uint16_t(__cdecl*)(SDL_JoystickID instance_id);
   using GetGamepadNameForIDFn = const char*(__cdecl*)(SDL_JoystickID instance_id);
-  using GetGamepadButtonFn = bool(__cdecl*)(SDL_Gamepad* gamepad, int button);
-  using GetGamepadAxisFn = int16_t(__cdecl*)(SDL_Gamepad* gamepad, int axis);
 
   HMODULE mod = nullptr;
   GetGamepadsFn GetGamepads = nullptr;
   FreeFn Free = nullptr;
-  GetGamepadFromIDFn GetGamepadFromID = nullptr;
-  OpenGamepadFn OpenGamepad = nullptr;
   GetGamepadTypeForIDFn GetGamepadTypeForID = nullptr;
   GetGamepadVendorForIDFn GetGamepadVendorForID = nullptr;
   GetGamepadProductForIDFn GetGamepadProductForID = nullptr;
   GetGamepadNameForIDFn GetGamepadNameForID = nullptr;
-  GetGamepadButtonFn GetGamepadButton = nullptr;
-  GetGamepadAxisFn GetGamepadAxis = nullptr;
 
   bool Resolve() {
-    HMODULE current = GetModuleHandleW(L"SDL3.dll");
-    if (!current) current = LoadLibraryW(L"SDL3.dll");
+    HMODULE current = GetModuleHandleW(L"SDL3.dll");  // only the SDL the game already loaded
     if (!current) return false;
     if (mod == current && GetGamepads) return true;
     mod = current;
     GetGamepads = reinterpret_cast<GetGamepadsFn>(GetProcAddress(mod, "SDL_GetGamepads"));
     Free = reinterpret_cast<FreeFn>(GetProcAddress(mod, "SDL_free"));
-    GetGamepadFromID = reinterpret_cast<GetGamepadFromIDFn>(GetProcAddress(mod, "SDL_GetGamepadFromID"));
-    OpenGamepad = reinterpret_cast<OpenGamepadFn>(GetProcAddress(mod, "SDL_OpenGamepad"));
     GetGamepadTypeForID = reinterpret_cast<GetGamepadTypeForIDFn>(GetProcAddress(mod, "SDL_GetGamepadTypeForID"));
     GetGamepadVendorForID = reinterpret_cast<GetGamepadVendorForIDFn>(GetProcAddress(mod, "SDL_GetGamepadVendorForID"));
     GetGamepadProductForID =
         reinterpret_cast<GetGamepadProductForIDFn>(GetProcAddress(mod, "SDL_GetGamepadProductForID"));
     GetGamepadNameForID = reinterpret_cast<GetGamepadNameForIDFn>(GetProcAddress(mod, "SDL_GetGamepadNameForID"));
-    GetGamepadButton = reinterpret_cast<GetGamepadButtonFn>(GetProcAddress(mod, "SDL_GetGamepadButton"));
-    GetGamepadAxis = reinterpret_cast<GetGamepadAxisFn>(GetProcAddress(mod, "SDL_GetGamepadAxis"));
     return GetGamepads != nullptr && Free != nullptr;
   }
 };
@@ -128,19 +123,24 @@ struct SdlGamepadApi {
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 
 XInputGetStateFn ResolveXInputGetState() {
-  static bool resolved = false;
-  static XInputGetStateFn fn = nullptr;
-  if (!resolved) {
-    resolved = true;
+  static const XInputGetStateFn fn = [] {
     HMODULE xi = GetModuleHandleW(L"xinput1_4.dll");
     if (!xi) xi = GetModuleHandleW(L"xinput9_1_0.dll");
     if (!xi) xi = LoadLibraryW(L"xinput1_4.dll");
     if (!xi) xi = LoadLibraryW(L"xinput9_1_0.dll");
-    if (xi) {
-      fn = reinterpret_cast<XInputGetStateFn>(GetProcAddress(xi, "XInputGetState"));
-    }
-  }
+    return xi ? reinterpret_cast<XInputGetStateFn>(GetProcAddress(xi, "XInputGetState")) : nullptr;
+  }();
   return fn;
+}
+
+// Is one of our windows in front? A key held or a click made in another app is not the game's (and SDK patch 53 keeps
+// the pad working while the game is in the background - its prompts must not flip to key caps then).
+bool GameWindowInFront() {
+  HWND fg = GetForegroundWindow();
+  if (!fg) return false;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(fg, &pid);
+  return pid == GetCurrentProcessId();
 }
 #endif
 
@@ -209,13 +209,10 @@ class PromptDeviceMonitor::WindowWatcher final : public rex::ui::WindowInputList
   bool has_last_pos_ = false;
 };
 
-PromptDeviceMonitor::PromptDeviceMonitor() {
-  last_detected_pad_style_ = DefaultGamepadStyleLocked();
-  committed_auto_style_ = last_detected_pad_style_;
-}
+PromptDeviceMonitor::PromptDeviceMonitor() = default;
 
 PromptDeviceMonitor::~PromptDeviceMonitor() {
-  DetachInputSystem(nullptr);
+  Stop();
   DetachWindow(nullptr);
 }
 
@@ -348,34 +345,57 @@ std::optional<DeviceStyle> PromptDeviceMonitor::DetectConnectedRawInputPadStyle(
 #endif
 }
 
-void PromptDeviceMonitor::AttachInputSystem(rex::input::InputSystem* input_system) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  attached_input_system_ = input_system;
-  if (input_system) {
-    if (auto detected = DetectConnectedRawInputPadStyle()) {
-      last_detected_pad_style_ = *detected;
-      has_detected_pad_ = true;
-      if (!has_committed_auto_ || committed_auto_style_ != DeviceStyle::kKeyboard) {
-        committed_auto_style_ = *detected;
-      }
+std::optional<DeviceStyle> PromptDeviceMonitor::ScanConnectedPadStyle() const {
+  if (auto raw = DetectConnectedRawInputPadStyle()) return raw;
+#ifdef _WIN32
+  static SdlGamepadApi sdl;  // monitor thread only
+  if (sdl.Resolve()) {
+    int count = 0;
+    SdlGamepadApi::SDL_JoystickID* ids = sdl.GetGamepads(&count);
+    std::optional<DeviceStyle> found;
+    for (int i = 0; ids && i < count && !found; ++i) {
+      const auto id = ids[i];
+      const int type = sdl.GetGamepadTypeForID ? sdl.GetGamepadTypeForID(id) : 0;
+      const uint16_t vid = sdl.GetGamepadVendorForID ? sdl.GetGamepadVendorForID(id) : 0;
+      const uint16_t pid = sdl.GetGamepadProductForID ? sdl.GetGamepadProductForID(id) : 0;
+      const char* name = sdl.GetGamepadNameForID ? sdl.GetGamepadNameForID(id) : nullptr;
+      found = ClassifyGamepad(type, vid, pid, name ? name : "");
     }
+    if (ids) sdl.Free(ids);
+    if (found) return found;
   }
+#endif
+  if (IsSteamDeckEnvironment()) return DeviceStyle::kSteamDeck;
+  return std::nullopt;
+}
+
+void PromptDeviceMonitor::AttachInputSystem(rex::input::InputSystem* input_system) {
+  attached_input_system_.store(input_system, std::memory_order_release);
 }
 
 void PromptDeviceMonitor::DetachInputSystem(rex::input::InputSystem* input_system) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!input_system || attached_input_system_ == input_system) {
-    attached_input_system_ = nullptr;
+  rex::input::InputSystem* expected = input_system;
+  if (!input_system) {
+    attached_input_system_.store(nullptr, std::memory_order_release);
+  } else {
+    attached_input_system_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
   }
 }
 
-DeviceStyle PromptDeviceMonitor::DefaultGamepadStyleLocked() const {
-  if (IsSteamDeckEnvironment()) return DeviceStyle::kSteamDeck;
-  if (rex::cvar::Query<bool>("cogbox_menu_ps")) return DeviceStyle::kPlayStation;
-  if (auto detected = DetectConnectedRawInputPadStyle()) {
-    return *detected;
+void PromptDeviceMonitor::ReadModeLocked() {
+  mode_ = Mode::kAuto;
+  forced_style_ = DeviceStyle::kOriginal;
+  const std::string values[] = {REXCVAR_GET(gow_button_prompts), REXCVAR_GET(gow2_button_prompts),
+                                rex::cvar::GetFlagByName("gow3_button_prompts"),
+                                rex::cvar::GetFlagByName("gowj_button_prompts")};
+  for (const std::string& v : values) {
+    if (const auto style = ParseModeOption(v)) {
+      mode_ = *style == DeviceStyle::kOriginal ? Mode::kOriginal : Mode::kForced;
+      forced_style_ = *style;
+      break;
+    }
   }
-  return DeviceStyle::kXbox;
+  keyboard_allowed_ = !REXCVAR_GET(gow_button_prompts_keep_pad);
 }
 
 void PromptDeviceMonitor::Reset() {
@@ -383,101 +403,91 @@ void PromptDeviceMonitor::Reset() {
   last_kbm_ms_ = 0;
   last_pad_ms_ = 0;
   has_detected_pad_ = false;
-  last_detected_pad_style_ = DefaultGamepadStyleLocked();
-  committed_auto_style_ = last_detected_pad_style_;
+  last_detected_pad_style_ = DeviceStyle::kXbox;
+  committed_auto_style_ = DeviceStyle::kXbox;
   has_committed_auto_ = false;
-  last_gow_cvar_ = REXCVAR_GET(gow_button_prompts);
-  last_gow2_cvar_ = REXCVAR_GET(gow2_button_prompts);
-  sticky_forced_style_ = ParseModeOption(last_gow_cvar_);
-  if (!sticky_forced_style_) {
-    sticky_forced_style_ = ParseModeOption(last_gow2_cvar_);
-  }
   has_applied_style_ = false;
-  last_poll_ms_ = 0;
-  dirty_.store(false, std::memory_order_release);
+  last_keybind_sig_.clear();
   keys_down_.reset();
-  mouse_down_.store(false, std::memory_order_relaxed);
+  mouse_down_ = false;
+  ReadModeLocked();
 }
 
 void PromptDeviceMonitor::ResetInputStates() {
   std::lock_guard<std::mutex> lock(mutex_);
   keys_down_.reset();
-  mouse_down_.store(false, std::memory_order_relaxed);
+  mouse_down_ = false;
 }
 
-void PromptDeviceMonitor::NotifyKeyDown(uint64_t timestamp_ms) {
-  NotifyKeyboardMouseActivity(timestamp_ms);
-}
+void PromptDeviceMonitor::NotifyKeyDown(uint64_t timestamp_ms) { NotifyKeyboardMouseActivity(timestamp_ms); }
 
 void PromptDeviceMonitor::NotifyKeyDown(uint32_t vk, uint64_t timestamp_ms) {
-  if (timestamp_ms == 0) timestamp_ms = NowMs();
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (vk < 256) {
-      keys_down_.set(vk);
-    }
+    if (vk < 256) keys_down_.set(vk);
   }
   NotifyKeyboardMouseActivity(timestamp_ms);
 }
 
-void PromptDeviceMonitor::NotifyKeyUp(uint64_t timestamp_ms) {
+void PromptDeviceMonitor::NotifyKeyUp(uint64_t) {
   std::lock_guard<std::mutex> lock(mutex_);
   keys_down_.reset();
 }
 
-void PromptDeviceMonitor::NotifyKeyUp(uint32_t vk, uint64_t timestamp_ms) {
+void PromptDeviceMonitor::NotifyKeyUp(uint32_t vk, uint64_t) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (vk < 256) {
-    keys_down_.reset(vk);
-  }
+  if (vk < 256) keys_down_.reset(vk);
 }
 
 void PromptDeviceMonitor::NotifyMouseDown(uint64_t timestamp_ms) {
-  mouse_down_.store(true, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mouse_down_ = true;
+  }
   NotifyKeyboardMouseActivity(timestamp_ms);
 }
 
-void PromptDeviceMonitor::NotifyMouseUp(uint64_t timestamp_ms) {
-  mouse_down_.store(false, std::memory_order_relaxed);
+void PromptDeviceMonitor::NotifyMouseUp(uint64_t) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  mouse_down_ = false;
 }
 
-bool PromptDeviceMonitor::HasAnyKeyDownLocked() const {
+bool PromptDeviceMonitor::HasAnyKeyDownLocked(bool check_async) const {
   if (!keys_down_.any()) return false;
 #ifdef _WIN32
+  if (!check_async) return false;  // not in front: a key held elsewhere is not ours (and its key-up never reaches us)
   bool really_down = false;
   for (size_t i = 0; i < 256; ++i) {
-    if (keys_down_.test(i)) {
-      if ((GetAsyncKeyState(static_cast<int>(i)) & 0x8000) != 0) {
-        really_down = true;
-      } else {
-        const_cast<PromptDeviceMonitor*>(this)->keys_down_.reset(i);
-      }
+    if (!keys_down_.test(i)) continue;
+    if ((GetAsyncKeyState(static_cast<int>(i)) & 0x8000) != 0) {
+      really_down = true;
+    } else {
+      keys_down_.reset(i);  // a key-up we missed
     }
   }
   return really_down;
 #else
-  return keys_down_.any();
+  (void)check_async;
+  return true;
 #endif
 }
 
 bool PromptDeviceMonitor::IsKeyboardMouseInUse(uint64_t now_ms) const {
   if (now_ms == 0) now_ms = NowMs();
-
 #ifdef _WIN32
-  if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ||
-      (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
-      (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0) {
+  const bool in_front = GameWindowInFront();
+  if (in_front && ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
+                   (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0)) {
     return true;
   }
-#else
-  if (mouse_down_.load(std::memory_order_relaxed)) return true;
-#endif
-
   std::lock_guard<std::mutex> lock(mutex_);
-  if (HasAnyKeyDownLocked()) {
-    return true;
-  }
-  return (last_kbm_ms_ != 0 && now_ms < last_kbm_ms_ + 300);
+#else
+  const bool in_front = true;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (mouse_down_) return true;
+#endif
+  if (HasAnyKeyDownLocked(in_front)) return true;
+  return last_kbm_ms_ != 0 && now_ms < last_kbm_ms_ + kKbmRecentMs;
 }
 
 void PromptDeviceMonitor::NotifyKeyboardMouseActivity(uint64_t timestamp_ms) {
@@ -492,13 +502,10 @@ void PromptDeviceMonitor::NotifyKeyboardMouseActivity(uint64_t timestamp_ms) {
       committed_auto_style_ = DeviceStyle::kKeyboard;
     }
   }
-  dirty_.store(true, std::memory_order_release);
 }
 
 void PromptDeviceMonitor::NotifyMouseMove(int32_t dx, int32_t dy, uint64_t timestamp_ms) {
-  if (std::abs(dx) <= kMouseMoveDeadzonePx && std::abs(dy) <= kMouseMoveDeadzonePx) {
-    return;
-  }
+  if (std::abs(dx) <= kMouseMoveDeadzonePx && std::abs(dy) <= kMouseMoveDeadzonePx) return;
   NotifyKeyboardMouseActivity(timestamp_ms);
 }
 
@@ -508,257 +515,106 @@ void PromptDeviceMonitor::NotifyGamepadActivity(DeviceStyle pad_style, uint64_t 
   last_detected_pad_style_ = pad_style;
   has_detected_pad_ = true;
   last_pad_ms_ = timestamp_ms;
-  if (!has_committed_auto_) {
+  if (!has_committed_auto_ || committed_auto_style_ != DeviceStyle::kKeyboard || last_kbm_ms_ == 0 ||
+      timestamp_ms >= last_kbm_ms_ + kDebounceWindowMs) {
     committed_auto_style_ = pad_style;
     has_committed_auto_ = true;
-  } else if (committed_auto_style_ != DeviceStyle::kKeyboard) {
-    committed_auto_style_ = pad_style;
-  } else {
-    if (last_kbm_ms_ == 0 || timestamp_ms >= last_kbm_ms_ + kDebounceWindowMs) {
-      committed_auto_style_ = pad_style;
-    }
   }
-  dirty_.store(true, std::memory_order_release);
 }
 
 void PromptDeviceMonitor::SetDefaultGamepadStyle(DeviceStyle pad_style) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (last_pad_ms_ != 0 && has_detected_pad_) return;  // a pad was used: its style stands
+  last_detected_pad_style_ = pad_style;
   has_detected_pad_ = true;
-  if (last_pad_ms_ == 0) {
-    last_detected_pad_style_ = pad_style;
-    if (!has_committed_auto_ || committed_auto_style_ != DeviceStyle::kKeyboard) {
-      committed_auto_style_ = pad_style;
-    }
-    dirty_.store(true, std::memory_order_release);
+  if (!has_committed_auto_ || committed_auto_style_ != DeviceStyle::kKeyboard) {
+    committed_auto_style_ = pad_style;
   }
 }
 
 DeviceStyle PromptDeviceMonitor::GetDefaultGamepadStyle() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (has_detected_pad_) return last_detected_pad_style_;
-  return DefaultGamepadStyleLocked();
+  return has_detected_pad_ ? last_detected_pad_style_ : DeviceStyle::kXbox;
 }
 
-std::optional<DeviceStyle> PromptDeviceMonitor::ResolveForcedStyleLocked() const {
-  const std::string& gow_val = REXCVAR_GET(gow_button_prompts);
-  const std::string& gow2_val = REXCVAR_GET(gow2_button_prompts);
+DeviceStyle PromptDeviceMonitor::EvaluateActiveStyleLocked(uint64_t now_ms) {
+  if (mode_ == Mode::kOriginal) return DeviceStyle::kOriginal;
+  if (mode_ == Mode::kForced) return forced_style_;
 
-  const bool gow_changed = (gow_val != last_gow_cvar_);
-  const bool gow2_changed = (gow2_val != last_gow2_cvar_);
-
-  if (gow_changed || gow2_changed) {
-    if (gow_changed && !gow2_changed) {
-      last_gow_cvar_ = gow_val;
-      sticky_forced_style_ = ParseModeOption(gow_val);
-      if (!sticky_forced_style_ && ToLowerTrim(gow_val) == "auto" && ToLowerTrim(gow2_val) != "auto") {
-        REXCVAR_SET(gow2_button_prompts, "auto");
-        last_gow2_cvar_ = "auto";
-      }
-    } else if (gow2_changed && !gow_changed) {
-      last_gow2_cvar_ = gow2_val;
-      sticky_forced_style_ = ParseModeOption(gow2_val);
-      if (!sticky_forced_style_ && ToLowerTrim(gow2_val) == "auto" && ToLowerTrim(gow_val) != "auto") {
-        REXCVAR_SET(gow_button_prompts, "auto");
-        last_gow_cvar_ = "auto";
-      }
-    } else {
-      last_gow_cvar_ = gow_val;
-      last_gow2_cvar_ = gow2_val;
-      sticky_forced_style_ = ParseModeOption(gow_val);
-      if (!sticky_forced_style_) {
-        sticky_forced_style_ = ParseModeOption(gow2_val);
-      }
-    }
-  } else if (!sticky_forced_style_) {
-    if (auto p1 = ParseModeOption(gow_val)) {
-      sticky_forced_style_ = p1;
-    } else if (auto p2 = ParseModeOption(gow2_val)) {
-      sticky_forced_style_ = p2;
-    }
-  }
-
-  if (sticky_forced_style_) {
-    return sticky_forced_style_;
-  }
-
-  const std::string gow3_val = rex::cvar::GetFlagByName("gow3_button_prompts");
-  if (auto p3 = ParseModeOption(gow3_val)) return p3;
-
-  const std::string gowj_val = rex::cvar::GetFlagByName("gowj_button_prompts");
-  if (auto pj = ParseModeOption(gowj_val)) return pj;
-
-  return std::nullopt;
-}
-
-DeviceStyle PromptDeviceMonitor::EvaluateActiveStyleLocked(uint64_t now_ms) const {
-  if (const auto forced = ResolveForcedStyleLocked()) {
-    return *forced;
-  }
-
+  DeviceStyle style;
   if (last_kbm_ms_ == 0 && last_pad_ms_ == 0) {
-    const bool pad_present = has_detected_pad_ || rex::cvar::Query<bool>("cogbox_menu_ps") ||
-                             IsSteamDeckEnvironment() || DetectConnectedRawInputPadStyle().has_value();
-    if (!pad_present && rex::cvar::Query<bool>("mnk_mode")) {
-      return DeviceStyle::kKeyboard;
+    // Nothing pressed yet: the pad that is connected, else key caps when the game is set for keyboard and mouse.
+    if (has_detected_pad_) {
+      style = last_detected_pad_style_;
+    } else if (keyboard_allowed_ && rex::cvar::Query<bool>("mnk_mode")) {
+      style = DeviceStyle::kKeyboard;
+    } else {
+      style = DeviceStyle::kXbox;
     }
-    return pad_present ? (has_detected_pad_ ? last_detected_pad_style_ : DefaultGamepadStyleLocked())
-                       : DefaultGamepadStyleLocked();
-  }
-
-  const uint64_t eval_ms = (now_ms != 0) ? now_ms : std::max(last_kbm_ms_, last_pad_ms_);
-  if (!has_committed_auto_) {
-    committed_auto_style_ = (last_kbm_ms_ > last_pad_ms_) ? DeviceStyle::kKeyboard : last_detected_pad_style_;
-    has_committed_auto_ = true;
-  } else if (committed_auto_style_ == DeviceStyle::kKeyboard && last_pad_ms_ > last_kbm_ms_) {
-    if (last_kbm_ms_ == 0 || eval_ms >= last_kbm_ms_ + kDebounceWindowMs) {
+  } else {
+    const uint64_t eval_ms = now_ms != 0 ? now_ms : std::max(last_kbm_ms_, last_pad_ms_);
+    if (!has_committed_auto_) {
+      committed_auto_style_ = last_kbm_ms_ > last_pad_ms_ ? DeviceStyle::kKeyboard : last_detected_pad_style_;
+      has_committed_auto_ = true;
+    } else if (committed_auto_style_ == DeviceStyle::kKeyboard && last_pad_ms_ > last_kbm_ms_) {
+      if (last_kbm_ms_ == 0 || eval_ms >= last_kbm_ms_ + kDebounceWindowMs) {
+        committed_auto_style_ = last_detected_pad_style_;
+      }
+    } else if (committed_auto_style_ != DeviceStyle::kKeyboard && last_kbm_ms_ > last_pad_ms_) {
+      if (last_pad_ms_ == 0 || eval_ms >= last_pad_ms_ + kDebounceWindowMs) {
+        committed_auto_style_ = DeviceStyle::kKeyboard;
+      }
+    } else if (committed_auto_style_ != DeviceStyle::kKeyboard) {
       committed_auto_style_ = last_detected_pad_style_;
     }
-  } else if (committed_auto_style_ != DeviceStyle::kKeyboard && last_kbm_ms_ > last_pad_ms_) {
-    if (last_pad_ms_ == 0 || eval_ms >= last_pad_ms_ + kDebounceWindowMs) {
-      committed_auto_style_ = DeviceStyle::kKeyboard;
-    }
-  } else if (committed_auto_style_ != DeviceStyle::kKeyboard) {
-    committed_auto_style_ = last_detected_pad_style_;
+    style = committed_auto_style_;
   }
-
-  return committed_auto_style_;
+  // GitHub #104: with "Controller button prompts" on, keyboard / mouse use never brings the key caps.
+  if (style == DeviceStyle::kKeyboard && !keyboard_allowed_) {
+    style = has_detected_pad_ ? last_detected_pad_style_ : DeviceStyle::kXbox;
+  }
+  // Auto: an Xbox pad shows the game's own (Xbox 360) prompts - no overlay, no atlas.
+  if (style == DeviceStyle::kXbox) style = DeviceStyle::kOriginal;
+  return style;
 }
 
-DeviceStyle PromptDeviceMonitor::EvaluateActiveStyle(uint64_t now_ms) const {
-  DeviceStyle target = DeviceStyle::kXbox;
-  bool should_apply = false;
+DeviceStyle PromptDeviceMonitor::EvaluateActiveStyle(uint64_t now_ms) {
+  auto& compositor = ::xenos::renderer::prompt::GlobalPromptCompositor();
+  DeviceStyle target;
+  bool hide = false;
+  bool apply = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     target = EvaluateActiveStyleLocked(now_ms);
-    if (!has_applied_style_ || last_applied_style_ != target ||
-        ::xenos::renderer::prompt::GlobalPromptCompositor().ActiveStyle() != target) {
+    hide = mode_ == Mode::kAuto && target == DeviceStyle::kOriginal;
+    if (!has_applied_style_ || last_applied_style_ != target || last_applied_hide_ != hide) {
+      if (has_applied_style_) {
+        REXLOG_INFO("prompt_device_monitor: {} -> {}", DeviceStyleName(last_applied_style_), DeviceStyleName(target));
+      }
       last_applied_style_ = target;
+      last_applied_hide_ = hide;
       has_applied_style_ = true;
-      should_apply = true;
+      apply = true;
     }
   }
-  if (should_apply) {
-    ::xenos::renderer::prompt::GlobalPromptCompositor().SetActiveStyle(target);
+  // Another monitor (tests) may have moved the compositor; follow it back.
+  if (!apply && compositor.ActiveStyle() != target) apply = true;
+  // Outside our lock: building a style's atlases takes a while and window events must not wait on it.
+  if (apply) {
+    // Explicit "original" never touches the texture cache's overlays at all (the launcher's key caps stay as before).
+    bool explicit_original = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      explicit_original = mode_ == Mode::kOriginal;
+    }
+    if (!explicit_original || compositor.ActiveStyle() != DeviceStyle::kOriginal) {
+      compositor.SetActiveStyle(target, hide);
+    }
   }
+  published_style_.store(target, std::memory_order_relaxed);
   return target;
 }
 
-void PromptDeviceMonitor::PollHardwareLocked(uint64_t now_ms) {
-#ifdef _WIN32
-  const auto raw_style = DetectConnectedRawInputPadStyle();
-  if (raw_style) {
-    last_detected_pad_style_ = *raw_style;
-    has_detected_pad_ = true;
-  }
-  const DeviceStyle active_pad_style = raw_style.value_or(DefaultGamepadStyleLocked());
-
-  bool any_pad_input = false;
-
-  // 1. Query standalone SDL3.dll if dynamically loaded
-  if (!any_pad_input) {
-    static SdlGamepadApi sdl;
-    if (sdl.Resolve()) {
-      int count = 0;
-      SdlGamepadApi::SDL_JoystickID* ids = sdl.GetGamepads(&count);
-      if (ids && count > 0) {
-        for (int i = 0; i < count; ++i) {
-          const SdlGamepadApi::SDL_JoystickID id = ids[i];
-          const int sdl_type = sdl.GetGamepadTypeForID ? sdl.GetGamepadTypeForID(id) : 0;
-          const uint16_t vid = sdl.GetGamepadVendorForID ? sdl.GetGamepadVendorForID(id) : 0;
-          const uint16_t pid = sdl.GetGamepadProductForID ? sdl.GetGamepadProductForID(id) : 0;
-          const char* raw_name = sdl.GetGamepadNameForID ? sdl.GetGamepadNameForID(id) : "";
-          const DeviceStyle pad_style = ClassifyGamepad(sdl_type, vid, pid, raw_name ? raw_name : "");
-
-          if (!has_detected_pad_) {
-            has_detected_pad_ = true;
-            last_detected_pad_style_ = pad_style;
-            if (!has_committed_auto_) {
-              committed_auto_style_ = pad_style;
-            }
-          }
-
-          SdlGamepadApi::SDL_Gamepad* pad = sdl.GetGamepadFromID ? sdl.GetGamepadFromID(id) : nullptr;
-          if (!pad && sdl.OpenGamepad) {
-            pad = sdl.OpenGamepad(id);
-          }
-          if (!pad) continue;
-
-          bool active = false;
-          if (sdl.GetGamepadButton) {
-            for (int b = 0; b <= 20; ++b) {
-              if (sdl.GetGamepadButton(pad, b)) {
-                active = true;
-                break;
-              }
-            }
-          }
-          if (!active && sdl.GetGamepadAxis) {
-            for (int a = 0; a < 4; ++a) {
-              if (std::abs(static_cast<int>(sdl.GetGamepadAxis(pad, a))) > 10000) {
-                active = true;
-                break;
-              }
-            }
-            if (!active) {
-              if (sdl.GetGamepadAxis(pad, 4) > 4000 || sdl.GetGamepadAxis(pad, 5) > 4000) {
-                active = true;
-              }
-            }
-          }
-
-          if (active) {
-            any_pad_input = true;
-            last_detected_pad_style_ = pad_style;
-            has_detected_pad_ = true;
-            last_pad_ms_ = now_ms;
-            if (!has_committed_auto_ || committed_auto_style_ != DeviceStyle::kKeyboard || last_kbm_ms_ == 0 ||
-                now_ms >= last_kbm_ms_ + kDebounceWindowMs) {
-              committed_auto_style_ = pad_style;
-              has_committed_auto_ = true;
-            }
-            break;
-          }
-        }
-      }
-      if (ids) {
-        sdl.Free(ids);
-      }
-    }
-  }
-
-  // 3. Fallback to XInput (Xbox controllers)
-  if (!any_pad_input) {
-    if (XInputGetStateFn xinput_get = ResolveXInputGetState()) {
-      for (DWORD i = 0; i < 4; ++i) {
-        XINPUT_STATE st = {};
-        if (xinput_get(i, &st) == ERROR_SUCCESS) {
-          const DeviceStyle pad_style = active_pad_style;
-          if (!has_detected_pad_) {
-            has_detected_pad_ = true;
-            last_detected_pad_style_ = pad_style;
-          }
-          const XINPUT_GAMEPAD& gp = st.Gamepad;
-          const bool active = gp.wButtons != 0 || gp.bLeftTrigger > 30 || gp.bRightTrigger > 30 ||
-                              std::abs(static_cast<int>(gp.sThumbLX)) > 10000 ||
-                              std::abs(static_cast<int>(gp.sThumbLY)) > 10000 ||
-                              std::abs(static_cast<int>(gp.sThumbRX)) > 10000 ||
-                              std::abs(static_cast<int>(gp.sThumbRY)) > 10000;
-          if (active) {
-            last_detected_pad_style_ = pad_style;
-            last_pad_ms_ = now_ms;
-            if (!has_committed_auto_ || committed_auto_style_ != DeviceStyle::kKeyboard || last_kbm_ms_ == 0 ||
-                now_ms >= last_kbm_ms_ + kDebounceWindowMs) {
-              committed_auto_style_ = pad_style;
-              has_committed_auto_ = true;
-            }
-            break;
-          }
-        }
-      }
-    }
-  }
-#endif
-}
 std::string PromptDeviceMonitor::SnapshotKeybindSignature() const {
   std::string sig;
   sig.reserve(256);
@@ -769,80 +625,156 @@ std::string PromptDeviceMonitor::SnapshotKeybindSignature() const {
   return sig;
 }
 
-DeviceStyle PromptDeviceMonitor::Poll(uint64_t now_ms, bool force) {
+DeviceStyle PromptDeviceMonitor::Poll(uint64_t now_ms, bool) {
   if (now_ms == 0) now_ms = NowMs();
-
-  DeviceStyle target = DeviceStyle::kXbox;
-  bool should_apply = false;
-  bool should_rebuild_keycaps = false;
-
+  bool rebuild = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    const bool cvar_changed =
-        (REXCVAR_GET(gow_button_prompts) != last_gow_cvar_) || (REXCVAR_GET(gow2_button_prompts) != last_gow2_cvar_);
-    const bool was_dirty = dirty_.exchange(false, std::memory_order_acq_rel);
-    const bool interval_elapsed = (last_poll_ms_ == 0) || (now_ms >= last_poll_ms_ + kPollIntervalMs);
-
-    if (interval_elapsed || force) {
-      last_poll_ms_ = now_ms;
-      if (hardware_polling_enabled_.load(std::memory_order_relaxed)) {
-        PollHardwareLocked(now_ms);
-      }
-    }
-
-    target = EvaluateActiveStyleLocked(now_ms);
-
-    if (target == DeviceStyle::kKeyboard && (interval_elapsed || force || cvar_changed || was_dirty || last_keybind_sig_.empty())) {
-      std::string sig = SnapshotKeybindSignature();
-      if (!last_keybind_sig_.empty() && sig != last_keybind_sig_) {
-        should_rebuild_keycaps = true;
-      }
-      last_keybind_sig_ = std::move(sig);
-    }
-
-    if (!has_applied_style_ || last_applied_style_ != target ||
-        ::xenos::renderer::prompt::GlobalPromptCompositor().ActiveStyle() != target) {
-      REXLOG_INFO("prompt_device_monitor: switching active style {} -> {}",
-                  DeviceStyleName(last_applied_style_), DeviceStyleName(target));
-      last_applied_style_ = target;
-      has_applied_style_ = true;
-      should_apply = true;
-    }
+    ReadModeLocked();
+    std::string sig = SnapshotKeybindSignature();
+    rebuild = !last_keybind_sig_.empty() && sig != last_keybind_sig_;
+    last_keybind_sig_ = std::move(sig);
   }
-
-  auto& compositor = ::xenos::renderer::prompt::GlobalPromptCompositor();
-  if (target != DeviceStyle::kOriginal && !compositor.IsInitialized()) {
-    compositor.Initialize();
-  }
-  if (should_rebuild_keycaps) {
-    compositor.RebuildKeyboardOverlays();
-  }
-  if (should_apply) {
-    compositor.SetActiveStyle(target);
-  }
-  return target;
+  if (rebuild) ::xenos::renderer::prompt::GlobalPromptCompositor().RebuildKeyboardOverlays();
+  return EvaluateActiveStyle(now_ms);
 }
 
-void PromptDeviceMonitor::PollFromBind() {
-  const bool cvar_changed =
-      (REXCVAR_GET(gow_button_prompts) != last_gow_cvar_) || (REXCVAR_GET(gow2_button_prompts) != last_gow2_cvar_);
-  const bool has_cvar_override =
-      (REXCVAR_GET(gow_button_prompts) != "auto") || (REXCVAR_GET(gow2_button_prompts) != "auto");
-  const bool is_dirty = dirty_.load(std::memory_order_acquire);
+void PromptDeviceMonitor::Start(rex::ui::Window* window, rex::input::InputSystem* input_system) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ReadModeLocked();
+    if (mode_ == Mode::kOriginal) {
+      REXLOG_INFO("prompt_device_monitor: --gow_button_prompts=original - the game's own prompts, nothing started");
+      return;
+    }
+  }
+  if (thread_.joinable()) return;
+  AttachInputSystem(input_system);
+  AttachWindow(window);
+  stop_.store(false);
+  thread_ = std::thread([this] { ThreadMain(); });
+}
 
-  if (!cvar_changed && !has_cvar_override && !is_dirty && attached_window_ == nullptr &&
-      attached_input_system_ == nullptr && !has_detected_pad_) {
-    // Headless context with no cvar overrides and no monitor input notifications:
-    // if GlobalPromptCompositor has not been initialized yet, leave it as-is so unit tests
-    // calling PromptOverlayCompositor::SetActiveStyle() directly are not clobbered.
+void PromptDeviceMonitor::Stop() {
+  if (!thread_.joinable()) return;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stop_.store(true);
+  }
+  stop_cv_.notify_all();
+  thread_.join();
+  DetachInputSystem(nullptr);
+}
+
+void PromptDeviceMonitor::ThreadMain() {
+  auto& compositor = ::xenos::renderer::prompt::GlobalPromptCompositor();
+  if (!compositor.IsInitialized() && !compositor.Initialize()) {
+    REXLOG_WARN("prompt_device_monitor: no glyphs found - the game's own prompts stay");
     return;
   }
+  std::optional<DeviceStyle> scanned;
+  uint64_t next_scan = 0;
+  int16_t prev[4] = {};
+  bool has_prev = false;
+  while (!stop_.load()) {
+    const uint64_t now = NowMs();
 
-  const uint64_t now_ms = NowMs();
-  if (!cvar_changed && !is_dirty && last_poll_ms_ != 0 && now_ms < last_poll_ms_ + kPollIntervalMs) {
-    return;
+    // Every 2 s: which pad is connected (slow: RawInput / SDL lists), build the atlases the switch may need next so
+    // switching is instant, and follow keybind changes.
+    if (now >= next_scan) {
+      next_scan = now + kHardwareScanMs;
+      scanned = ScanConnectedPadStyle();
+      if (scanned) SetDefaultGamepadStyle(*scanned);
+      Mode mode;
+      DeviceStyle forced;
+      bool kb_allowed;
+      bool rebuild = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        mode = mode_;
+        forced = forced_style_;
+        kb_allowed = keyboard_allowed_;
+        std::string sig = SnapshotKeybindSignature();
+        rebuild = !last_keybind_sig_.empty() && sig != last_keybind_sig_;
+        last_keybind_sig_ = std::move(sig);
+      }
+      if (rebuild) compositor.RebuildKeyboardOverlays();
+      if (mode == Mode::kForced) {
+        compositor.PrepareStyle(forced);
+      } else {
+        if (kb_allowed) compositor.PrepareStyle(DeviceStyle::kKeyboard);
+        const DeviceStyle pad = GetDefaultGamepadStyle();
+        if (pad != DeviceStyle::kXbox) compositor.PrepareStyle(pad);
+      }
+    }
+
+    // Pads: the game's own input system (SDL: Xbox, PlayStation, Switch, Steam pads), plain XInput when there is none.
+    rex::input::InputSystem* input = attached_input_system_.load(std::memory_order_acquire);
+    if (!input) {
+      if (auto* rt = rex::Runtime::instance()) {
+        input = static_cast<rex::input::InputSystem*>(rt->input_system());
+        if (input) AttachInputSystem(input);
+      }
+    }
+    bool connected = false;
+    uint16_t buttons = 0;
+    uint8_t lt = 0, rt = 0;
+    int16_t sticks[4] = {};
+    if (input) {
+      for (uint32_t i = 0; i < 4 && !connected; ++i) {
+        rex::input::X_INPUT_STATE st = {};
+        if (input->GetStateForUI(i, &st) == rex::X_RESULT(0)) {  // X_ERROR_SUCCESS
+          buttons = static_cast<uint16_t>(st.gamepad.buttons);
+          lt = st.gamepad.left_trigger;
+          rt = st.gamepad.right_trigger;
+          sticks[0] = static_cast<int16_t>(st.gamepad.thumb_lx);
+          sticks[1] = static_cast<int16_t>(st.gamepad.thumb_ly);
+          sticks[2] = static_cast<int16_t>(st.gamepad.thumb_rx);
+          sticks[3] = static_cast<int16_t>(st.gamepad.thumb_ry);
+          connected = true;
+        }
+      }
+    }
+#ifdef _WIN32
+    else if (XInputGetStateFn get = ResolveXInputGetState()) {
+      for (DWORD i = 0; i < 4 && !connected; ++i) {
+        XINPUT_STATE s = {};
+        if (get(i, &s) == ERROR_SUCCESS) {
+          buttons = s.Gamepad.wButtons;
+          lt = s.Gamepad.bLeftTrigger;
+          rt = s.Gamepad.bRightTrigger;
+          sticks[0] = s.Gamepad.sThumbLX;
+          sticks[1] = s.Gamepad.sThumbLY;
+          sticks[2] = s.Gamepad.sThumbRX;
+          sticks[3] = s.Gamepad.sThumbRY;
+          connected = true;
+        }
+      }
+    }
+#endif
+    if (connected) {
+      // A pad the keyboard drives (Steam Input sending keys as a pad) is ignored while keys / mouse are in use; resting
+      // stick drift counts only when it moves.
+      const bool kbm_in_use = IsKeyboardMouseInUse(now);
+      bool active = !kbm_in_use && (buttons != 0 || lt > 40 || rt > 40);
+      if (!active && !kbm_in_use) {
+        constexpr int kStickDeadzone = 14000;
+        for (int a = 0; a < 4 && !active; ++a) {
+          const int v = std::abs(static_cast<int>(sticks[a]));
+          if (v <= kStickDeadzone) continue;
+          active = !has_prev || v > 20000 || std::abs(static_cast<int>(sticks[a]) - prev[a]) > 2000;
+        }
+      }
+      std::copy(std::begin(sticks), std::end(sticks), std::begin(prev));
+      has_prev = true;
+      if (active) NotifyGamepadActivity(scanned.value_or(GetDefaultGamepadStyle()), now);
+    }
+
+    EvaluateActiveStyle(now);
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    stop_cv_.wait_for(lock, std::chrono::milliseconds(kPadPollMs), [this] { return stop_.load(); });
   }
-  Poll(now_ms, cvar_changed || is_dirty);
 }
 
 void PromptDeviceMonitor::AttachWindow(rex::ui::Window* window) {
@@ -853,13 +785,10 @@ void PromptDeviceMonitor::AttachWindow(rex::ui::Window* window) {
     attached_window_->RemoveInputListener(window_watcher_.get());
     attached_window_->RemoveListener(window_watcher_.get());
   }
-  if (!window_watcher_) {
-    window_watcher_ = std::make_unique<WindowWatcher>(*this);
-  }
+  if (!window_watcher_) window_watcher_ = std::make_unique<WindowWatcher>(*this);
   attached_window_ = window;
   attached_window_->AddInputListener(window_watcher_.get(), 0);
   attached_window_->AddListener(window_watcher_.get());
-  dirty_.store(true, std::memory_order_release);
 }
 
 void PromptDeviceMonitor::DetachWindow(rex::ui::Window* window) {
