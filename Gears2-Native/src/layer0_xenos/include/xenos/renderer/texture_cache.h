@@ -230,6 +230,8 @@ class TextureCache {
     uint64_t overlay_gen = 0;  // overlay generation at the last Load
     bool has_overlay = false;  // whether an overlay or replacement was applied at the last Load
     uint64_t variant_swap_hash = 0;  // base-level XXH3 hash for which `overlay_variants` is valid
+    bool swap_checked = false;  // PR117 fix: content hashed at the last Load (a generation bump need not reload it)
+    bool prompt_known = false;  // PR117 fix: that content is a prompt atlas / alias or had an overlay
     std::unordered_map<const std::vector<uint8_t>*, OverlayVariant> overlay_variants;
     uint64_t TotalHostBytes() const {
       if (overlay_variants.empty()) return host_bytes;

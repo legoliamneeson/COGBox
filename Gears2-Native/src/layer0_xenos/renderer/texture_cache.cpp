@@ -76,7 +76,9 @@ struct TexSwap {
   std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> overlay;          // job 629: disk overlays (w, h + RGBA)
   std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> dynamic_overlay;  // in-memory overlays
   bool suppress_disk_prompt_overlays = false;
-  bool ever_used_dynamic = false;
+  std::atomic<bool> static_on{false};  // PR117 fix: replacements / disk overlays / dumps (fixed at Init)
+  std::atomic<bool> dyn_on{false};     // PR117 fix: dynamic overlays or prompt suppression active now
+  void SyncDyn() { dyn_on.store(!dynamic_overlay.empty() || suppress_disk_prompt_overlays, std::memory_order_release); }  // under mutex
   std::unordered_set<uint32_t> dump_sizes;  // w << 16 | h
   bool dump_all = false;                    // job 628: --gow2_texture_dump_sizes=all
   std::unordered_set<uint64_t> dumped;
@@ -132,13 +134,11 @@ struct TexSwap {
       }
       REXLOG_INFO("gow2_texture_dump: textures of {} to {}", dump_all ? std::string("every size") : std::to_string(dump_sizes.size()) + " size(s)", dump_dir);
     }
+    static_on.store(!replace.empty() || !overlay.empty() || !dump_sizes.empty() || dump_all, std::memory_order_release);
   }
   bool Dumps(uint32_t w, uint32_t h) const { return dump_all ? (w >= 32 && h >= 32) : dump_sizes.count((w << 16) | h) != 0; }
-  bool On() const {
-    std::lock_guard<std::mutex> lock(mutex);
-    return !replace.empty() || !overlay.empty() || !dynamic_overlay.empty() || ever_used_dynamic ||
-           suppress_disk_prompt_overlays || !dump_sizes.empty() || dump_all;
-  }
+  // PR117 fix: no lock on the hot path. Entries already carrying an overlay stay candidates through their own flags.
+  bool On() const { return static_on.load(std::memory_order_acquire) || dyn_on.load(std::memory_order_acquire); }
   bool HasReplace(uint64_t h) const {
     std::lock_guard<std::mutex> lock(mutex);
     return replace.count(h) != 0;
@@ -450,7 +450,6 @@ void SetDynamicOverlay(uint64_t hash, std::vector<uint8_t> overlay_data) {
   g_swap.Init();
   {
     std::lock_guard<std::mutex> lock(g_swap.mutex);
-    g_swap.ever_used_dynamic = true;
     if (overlay_data.empty()) {
       g_swap.dynamic_overlay.erase(hash);
     } else {
@@ -466,6 +465,7 @@ void SetDynamicOverlay(uint64_t hash, std::vector<uint8_t> overlay_data) {
         }
       }
     }
+    g_swap.SyncDyn();
   }
   g_overlay_gen.fetch_add(1, std::memory_order_acq_rel);
 }
@@ -474,7 +474,6 @@ void SetDynamicOverlayShared(uint64_t hash, std::shared_ptr<const std::vector<ui
   g_swap.Init();
   {
     std::lock_guard<std::mutex> lock(g_swap.mutex);
-    g_swap.ever_used_dynamic = true;
     if (!overlay_data || overlay_data->size() < 8) {
       g_swap.dynamic_overlay.erase(hash);
     } else {
@@ -485,6 +484,7 @@ void SetDynamicOverlayShared(uint64_t hash, std::shared_ptr<const std::vector<ui
         g_swap.dynamic_overlay[hash] = std::move(overlay_data);
       }
     }
+    g_swap.SyncDyn();
   }
   g_overlay_gen.fetch_add(1, std::memory_order_acq_rel);
 }
@@ -495,6 +495,7 @@ void SetSuppressDiskOverlaysForPrompts(bool suppress) {
     std::lock_guard<std::mutex> lock(g_swap.mutex);
     if (g_swap.suppress_disk_prompt_overlays == suppress) return;
     g_swap.suppress_disk_prompt_overlays = suppress;
+    g_swap.SyncDyn();
   }
   g_overlay_gen.fetch_add(1, std::memory_order_acq_rel);
 }
@@ -505,6 +506,7 @@ void ClearDynamicOverlays() {
     std::lock_guard<std::mutex> lock(g_swap.mutex);
     g_swap.dynamic_overlay.clear();
     g_swap.suppress_disk_prompt_overlays = false;
+    g_swap.SyncDyn();
   }
   g_overlay_gen.fetch_add(1, std::memory_order_acq_rel);
 }
@@ -550,7 +552,6 @@ uint32_t UntileCode(gpu::Format f) {
 
 uint32_t TextureCache::Bind(const uint32_t* fetch, uint32_t slots_2d, uint32_t slots_cube, uint32_t slots_3d,
                             uint64_t frame, gpu::TextureView views[96], gpu::SamplerDesc samplers[32]) {
-  ::xenos::input::GlobalPromptDeviceMonitor().PollFromBind();
   uint32_t stand_ins = 0;
   last_scaled_mask_ = 0;
   const uint64_t epoch = watch_.Epoch();
@@ -749,7 +750,8 @@ TextureCache::Entry& TextureCache::Lookup(const uint32_t* tf, uint32_t host_kind
     const uint32_t dim = Bits(tf[5], 9, 2);
     const bool stacked = Bits(tf[1], 10, 1);
     const bool overlay_candidate = e.has_overlay || e.ov_scale > 1 || !e.overlay_variants.empty() ||
-                                   (g_swap.On() && host_kind == 0 && dim == 1 && !stacked && format == 20);
+                                   e.prompt_known ||
+                                   (g_swap.On() && !e.swap_checked && host_kind == 0 && dim == 1 && !stacked && format == 20);
     if (overlay_candidate) {
       const uint64_t epoch_before = watch_.Epoch();
       e.loaded_frame = frame;
@@ -1312,6 +1314,13 @@ void TextureCache::Load(Entry& e, const uint32_t* tf, uint32_t host_kind) {
     swap_dump = !g_swap.dump_dir.empty() && g_swap.Dumps(w, h) && g_swap.dump_count < 4000 &&
                 g_swap.dumped.insert(swap_hash).second;
   }
+  if (swap_hash) {  // PR117 fix: remember what this content is, so a generation bump needs no rehash to skip it
+    e.swap_checked = true;
+    e.prompt_known = swap_overlay != nullptr || prompt::IsPromptAtlasOrAlias(swap_hash) || prompt::IsPromptAtlasOrAlias(rex_hash);
+  } else {  // not hashed this time (nothing on): the content may have changed, so it is unknown again
+    e.swap_checked = false;
+    e.prompt_known = false;
+  }
   const uint32_t ov_scale = swap_overlay ? OverlayScale(*swap_overlay, w, h) : 1u;  // job 661
   const bool is_prompt_or_overlay =
       swap_overlay != nullptr || !e.overlay_variants.empty() ||
@@ -1388,6 +1397,9 @@ void TextureCache::Load(Entry& e, const uint32_t* tf, uint32_t host_kind) {
   // Recreate the host texture when an existing slot changes overlay scale (e.g. 1x <-> 4x prompt atlas) or needs UAV
   // storage it was not created with.
   if (e.texture && (e.ov_scale != ov_scale || (gpu && !e.gpu_storage))) {
+    for (auto v = e.overlay_variants.begin(); v != e.overlay_variants.end();) {  // PR117 fix: no double destroy
+      if (v->second.texture == e.texture) v = e.overlay_variants.erase(v); else ++v;
+    }
     backend_.DestroyTexture(e.texture);
     e.texture = 0;
     stats_.host_bytes -= std::min(stats_.host_bytes, e.host_bytes);
