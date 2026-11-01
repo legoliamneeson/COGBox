@@ -14,7 +14,7 @@
 // A SoundNodeWave's Xbox 360 data is a bulk data record - flags, element count, size on disk, offset in file (4 bytes
 // each, big-endian), then the bytes - holding UE3's XMA layout (vgmstream xma_ue3.c; UE Viewer UnSound.h): format
 // chunk size, seek table size, data size (u32 BE each), the format chunk (XMA2WAVEFORMAT, big-endian; or a 0x34-byte
-// WAVEFORMATEX + XMA2 extension, or an XMA1 XMAWAVEFORMAT), the seek table, then XMA packets (2048 bytes each). The
+// WAVEFORMATEX + XMA2 extension, or an XMA1 XMAWAVEFORMAT - little-endian in Gears 1, job 994), the seek table, then XMA packets (2048 bytes each). The
 // three sizes must add up to the record's element count, so a wrong record is never taken for sound.
 //
 // XMA decoding: FFmpeg's xma1 / xma2 decoder (libavcodec, LGPL 2.1), avcodec-61.dll + avutil-59.dll beside CogBox.exe,
@@ -37,8 +37,9 @@ bool ue3_unpack(const std::vector<uint8_t> &file, std::vector<uint8_t> &out, std
 struct Wave {
     size_t at = 0, size = 0;    // the XMA record (from its format chunk size on) in the unpacked package
     int xma = 2;                // 1: XMA1, 2: XMA2
+    bool le = false;            // the format chunk is little-endian (Gears 1's XMA1)
     int channels = 0, rate = 0;
-    uint32_t samples = 0;       // as the format says (0: not given)
+    uint32_t samples = 0;       // as the format says (XMA1: from its bytes per second; 0: not known)
     std::string name;           // the export's name when the summary could be read ("" otherwise)
     double seconds() const { return rate > 0 ? double(samples) / rate : 0; }
 };

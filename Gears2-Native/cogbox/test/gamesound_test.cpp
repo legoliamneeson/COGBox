@@ -61,6 +61,11 @@ static Bytes xma_record(int kind, int channels, uint32_t rate, uint32_t samples,
         f.push_back(4); f.push_back(1); f.push_back(0); f.push_back(0);
         be32(f, 0); be32(f, 0); be32(f, rate); be32(f, 0); be32(f, 0); be32(f, 0x10000); be32(f, samples); be32(f, samples); be32(f, 1);
         f.push_back(uint8_t(channels)); f.push_back(0); be16(f, 3);
+    } else if (kind == 'L') {   // Gears 1: XMAWAVEFORMAT little-endian (job 994's bytes), one stream, 21156 bytes / s
+        const uint8_t g1[32] = { 0x65, 0x01, 0x10, 0x00, 0xD6, 0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0xA4, 0x52, 0x00, 0x00,
+                                 0x44, 0xAC, 0x00, 0x00, 0x72, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x00 };
+        f.assign(g1, g1 + 32);
+        (void)channels; (void)rate; (void)samples;
     } else {   // XMAWAVEFORMAT, one stream
         be16(f, 0x165); be16(f, 16); be16(f, 0); be16(f, 0); be16(f, 1); f.push_back(0); f.push_back(0);
         be32(f, 0); be32(f, rate); be32(f, 0); be32(f, 0); f.push_back(0); f.push_back(uint8_t(channels)); be16(f, 3);
@@ -226,6 +231,17 @@ int main()
         CHECK(!ue3_unpack(c2, pkg, why) && why.find("damaged") != std::string::npos);
         CHECK(!ue3_unpack(noise, pkg, why));
         CHECK(ue3_find_waves(noise).empty());
+    }
+    {   // Gears 1's little-endian XMA1 format
+        Pkg g1 = package({ { "G1_Music", xma_record('L', 0, 0, 0, 463, true) } });
+        std::vector<Wave> ws = ue3_find_waves(g1.b);
+        CHECK(ws.size() == 1 && ws[0].xma == 1 && ws[0].le && ws[0].channels == 2 && ws[0].rate == 44100 &&
+              ws[0].samples == uint32_t(uint64_t(463 * 2048) * 44100 / 21156) && ws[0].name == "G1_Music");
+        if (!ws.empty()) std::printf("  Gears 1 format: %d ch %d Hz %.1f s\n", ws[0].channels, ws[0].rate, ws[0].seconds());
+        std::vector<int16_t> pcm;
+        std::string why;
+        CHECK(ws.size() == 1 && !xma_decode(g1.b, ws[0], pcm, why));   // random packets: refused
+        std::printf("  ... random packets: refused (%s)\n", why.c_str());
     }
     {   // trimming
         std::vector<int16_t> p = { 0, 0, 10, -10, 63, 0, 500, 0, 1, 1 };
