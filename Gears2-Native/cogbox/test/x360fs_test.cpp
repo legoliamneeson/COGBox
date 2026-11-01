@@ -584,6 +584,22 @@ static void test_disc()
     }
     fs::path iso = W / ("game_" + std::to_string(0xFD90000ull) + ".iso");
 
+    {   // one file read in place (the launcher's music): whole, a range, past the end, a folder, not there
+        const Node &cooked = root.kids[1].kids[0];
+        const Node &lvl = cooked.kids[299];
+        Bytes got;
+        uint64_t sz = 0;
+        CHECK(image_read_file(iso, "GearGame/CookedXenon/" + lvl.name, 0, 1 << 20, got, &sz) && got == lvl.data && sz == lvl.data.size());
+        const Node &mov = root.kids[1].kids[2].kids[0];
+        CHECK(image_read_file(iso, "gamegame_typo/x", 0, 10, got) == false && got.empty());
+        CHECK(image_read_file(iso, "GEARGAME\\MOVIES\\intro.bik", 2047, 5000, got, &sz) && sz == mov.data.size() &&
+              got == Bytes(mov.data.begin() + 2047, mov.data.begin() + 2047 + 5000));
+        CHECK(image_read_file(iso, "GearGame/Movies/Intro.bik", sz - 10, 100, got) && got == Bytes(mov.data.end() - 10, mov.data.end()));
+        CHECK(!image_read_file(iso, "GearGame/Movies/Intro.bik", sz + 1, 1, got));
+        CHECK(!image_read_file(iso, "GearGame/Movies", 0, 1, got));
+        CHECK(!image_read_file(W / "nothing.iso", "default.xex", 0, 1, got));
+    }
+
     std::vector<Entry> list;
     std::string err;
     CHECK(list_disc(iso, list, err));
@@ -877,6 +893,13 @@ static void test_god()
     CHECK(read_package_info(hdr, info, err) && info.is_svod() && info.content_type == kContentGamesOnDemand && info.data_file_count == 2);
     std::vector<Entry> list;
     CHECK_MSG(list_god(hdr, list, err), err);
+    {   // a file read in place, across the Data0000 / Data0001 boundary
+        Bytes got;
+        uint64_t sz = 0;
+        CHECK(image_read_file(hdr, "span.bin", 0, 1 << 20, got, &sz) && got == span.data && sz == span.data.size());
+        CHECK(image_read_file(hdr, "SPAN.BIN", 99 * 2048 + 5, 4000, got) && got == Bytes(span.data.begin() + 99 * 2048 + 5, span.data.begin() + 99 * 2048 + 4005));
+        CHECK(image_read_file(hdr, "default.xex", 0, 1 << 20, got) && got == xex);
+    }
     fs::path out = W / "god_out";
     CHECK_MSG(extract_god(hdr, out, nullptr, nullptr, err), err);
     CHECK(tree_hashes(out) == want);

@@ -538,14 +538,16 @@ void front_draw(App &a, ImVec2 size)
             ImGui::SetCursorScreenPos(ImVec2(size.x - as.x - S(24), S(22) + bs.y + S(8)));
             if (th_button("ADD GAME", as, !busy, F_BOLD) || (nav && !busy && ImGui::IsKeyPressed(ImGuiKey_GamepadBack, false)))
                 add_game_ask(a);
-            // Shagg 1 Nov: music on / off (music.cpp), beside it - only when a game has a track (music\<key>.wav)
-            if (music_any_track()) {
+            // Shagg 1 Nov: music on / off (music.cpp), beside it - when a game in the library has a copy to read it from
+            if (music_any_source(a)) {
                 const char *ml = music_on(a) ? "MUSIC: ON" : "MUSIC: OFF";
                 ImVec2 ms(F_BOLD->CalcTextSizeA(FS(F_BOLD), FLT_MAX, 0, tr(ml)).x + S(36), bs.y);
                 ImGui::SetCursorScreenPos(ImVec2(size.x - as.x - S(24) - S(12) - ms.x, S(22) + bs.y + S(8)));
-                if (th_button(ml, ms, true, F_BOLD) || (nav && ImGui::IsKeyPressed(ImGuiKey_GamepadR3, false))) music_set_on(a, !music_on(a));
+                if (th_button(ml, ms, true, F_BOLD) || (nav && ImGui::IsKeyPressed(ImGuiKey_GamepadR3, false)) ||
+                    (!ImGui::GetIO().WantTextInput && !a.modal.open && ImGui::IsKeyPressed(ImGuiKey_M, false)))
+                    music_set_on(a, !music_on(a));
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
-                    ImGui::SetTooltip("%s", tr("Plays the chosen game's menu music in the library and on its settings page."));
+                    ImGui::SetTooltip("%s", tr("Plays the chosen game's own menu music, read from your copy, in the library and on its settings page. M switches it."));
             }
         }
     }
@@ -624,7 +626,7 @@ void front_draw(App &a, ImVec2 size)
     // the hint line
     std::string padHint = std::string(tr("D-pad: choose a game")) + "      " + pad_name(a, "LB") + " / " + pad_name(a, "RB") + ": " + tr("Play or Settings") + "      " +
                           pad_name(a, "A") + ": " + tr("press") + "      " + pad_name(a, "X") + ": " + tr("settings") + "      " + pad_name(a, "Y") + ": " + tr("box art") + "      " + pad_name(a, "Back") + ": " + tr("add a game") + "      " +
-                          (music_any_track() ? std::string(pad_name(a, "RS")) + ": " + tr("music") + "      " : std::string()) +
+                          (music_any_source(a) ? std::string(pad_name(a, "RS")) + ": " + tr("music") + "      " : std::string()) +
                           pad_name(a, "LT") + " + " + pad_name(a, "RT") + ": " + tr("fullscreen") + "      " + pad_name(a, "Start") + ": " + tr("quit");   // job 523 / 525 / 526; 0.2.0 tr
     const char *hint = a.padConnected && a.lastPad ? padHint.c_str()   // 0.2.0: the device used last
                                       : tr("Arrows / wheel: turn      Enter: play      F11: fullscreen      Esc: quit      drop a disc image or folder on the window to add it");

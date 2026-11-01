@@ -178,6 +178,6 @@ anywhere. Attach it to an issue at https://github.com/Shagg88/COGBox/issues
 Licences
 --------
 COGBox and the ports' own code are under the MIT licence (LICENSE.txt). The libraries, fonts and
-vendor upscalers included (SDL3, Dear ImGui, miniz, stb, the rexglue SDK, AMD FidelityFX, NVIDIA
+vendor upscalers included (SDL3, Dear ImGui, miniz, stb, FFmpeg's XMA decoder, the rexglue SDK, AMD FidelityFX, NVIDIA
 DLSS, Intel XeSS, the DirectX Shader Compiler) come under their own terms, in the licenses folder.
 Fonts: Anton, Barlow and Barlow Condensed, under the SIL Open Font License 1.1.

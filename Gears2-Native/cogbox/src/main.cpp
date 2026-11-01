@@ -461,6 +461,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         int argc = 0;
         wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         if (argv && argc >= 2 && wcscmp(argv[1], L"--x360test") == 0) return x360test(argc, argv);
+        // the library music's test switches (music.cpp): one game's track from one copy / every long wave in a game folder
+        if (argv && argc >= 5 && wcscmp(argv[1], L"--musictest") == 0) return music_test(narrow(argv[2]), narrow(argv[3]), narrow(argv[4]));
+        if (argv && argc >= 4 && wcscmp(argv[1], L"--musicscan") == 0) return music_scan(narrow(argv[2]), narrow(argv[3]));
+        if (argv && argc >= 4 && wcscmp(argv[1], L"--musicprobe") == 0) return music_probe(narrow(argv[2]), narrow(argv[3]));
         // 0.2.0: a game's desktop shortcut starts COGBox with --play <gears1 | gears2 | gears3 | judgment>
         if (argv && argc >= 3 && wcscmp(argv[1], L"--play") == 0) g_playArg = narrow(argv[2]);
         if (argv) LocalFree(argv);
@@ -589,7 +593,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             if (e.type == SDL_EVENT_KEY_DOWN) g_lastKeyScancode = (int)e.key.scancode;   // the key's position (page.cpp key capture)
             if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL) a.lastPad = false;
             if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) a.dropped.push_back(e.drop.data);
-            if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && !a.run.proc) { refresh_games(a, false); covers_load(a); music_rescan(); }
+            if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && !a.run.proc) { refresh_games(a, false); covers_load(a); }
         }
         play_poll(a);
         music_update(a);   // Shagg 1 Nov (music.cpp)

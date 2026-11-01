@@ -383,7 +383,14 @@ void install_poll(App &a)
         // 0.2.0: downloadable content is not the game's copy or update - its folder is never remembered as either
         if (g_plan.dlc) {}
         else if (g_plan.update) game_set_update(a.ini, g_plan.game, g_plan.finalDir);
-        else game_set_data(a.ini, g_plan.game, g_plan.finalDir, g_plan.inPlace);
+        else {
+            game_set_data(a.ini, g_plan.game, g_plan.finalDir, g_plan.inPlace);
+            // Shagg 1 Nov: the disc image / Games on Demand copy it came from, for the library music (music.cpp reads it
+            // in place when the game folder can't give the track); a folder added as it is needs no second entry
+            const bool image = g_plan.kind == x360fs::SourceKind::DiscImage || g_plan.kind == x360fs::SourceKind::GodContainer;
+            if (image) a.ini.set(game_def(g_plan.game).key, "Image", narrow(g_plan.resolved));
+            else a.ini.remove(game_def(g_plan.game).key, "Image");
+        }
         a.ini.save();
         refresh_games(a, true);
         // the page's values again from the store, so Version follows the newly added update (unless the page has unsaved changes)

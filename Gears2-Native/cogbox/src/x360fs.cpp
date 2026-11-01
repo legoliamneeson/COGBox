@@ -1424,6 +1424,45 @@ bool list_god(const fs::path &header, std::vector<Entry> &out, std::string &erro
     return true;
 }
 
+namespace {
+bool read_in_volume(SectorSource &src, const Volume &v, const std::string &path, uint64_t off, size_t len,
+                    std::vector<uint8_t> &out, uint64_t *file_size)
+{
+    RawEntry e;
+    std::string err;
+    if (!find_item(src, v, path, e, err) || (e.attr & 0x10)) return false;
+    if (file_size) *file_size = e.size;
+    if (off > e.size) return false;
+    out.resize(size_t(std::min<uint64_t>(len, e.size - off)));
+    if (src.read(uint64_t(e.sector) * kSector + off, out.data(), out.size(), err)) return true;
+    out.clear();
+    return false;
+}
+}  // namespace
+
+bool image_read_file(const fs::path &image, const std::string &path, uint64_t off, size_t len, std::vector<uint8_t> &out,
+                     uint64_t *file_size)
+{
+    out.clear();
+    std::string err;
+    Volume v;
+    std::error_code ec;
+    if (!fs::is_regular_file(image, ec)) return false;
+    {
+        InFile f;
+        uint64_t part;
+        if (open_disc(image, f, part, v, err)) {
+            IsoSource src(f, part);
+            return read_in_volume(src, v, path, off, len, out, file_size);
+        }
+    }
+    PackageInfo info;
+    if (!package_header(image, info) || !info.is_svod()) return false;
+    SvodSource src;
+    if (!open_god(image, src, v, err)) return false;
+    return read_in_volume(src, v, path, off, len, out, file_size);
+}
+
 bool extract_god(const fs::path &header, const fs::path &out_dir, ProgressFn progress, CancelFlag cancel, std::string &error)
 {
     error.clear();

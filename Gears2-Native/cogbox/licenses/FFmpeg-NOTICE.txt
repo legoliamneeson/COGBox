@@ -1,0 +1,13 @@
+FFmpeg (avcodec-61.dll, avutil-59.dll)
+
+COGBox's library music decodes the games' own XMA audio, read from your copy of the game, with FFmpeg's
+xma1 / xma2 decoder. FFmpeg is free software under the GNU Lesser General Public License version 2.1 or later
+(FFmpeg-LGPL-2.1.txt). It is used unmodified, as two separate DLLs that CogBox.exe loads when music plays; you
+may replace them with your own build of the same FFmpeg version (libavcodec 61, libavutil 59).
+
+Source: FFmpeg 7.1.1, https://github.com/FFmpeg/FFmpeg (tag n7.1.1), https://ffmpeg.org
+Built with tools/build_ffmpeg_xma.sh in the COGBox source:
+  configure --target-os=mingw32 --arch=x86_64 --cross-prefix=x86_64-w64-mingw32- --enable-shared --disable-static
+            --disable-everything --disable-programs --disable-doc --disable-avdevice --disable-avformat
+            --disable-swresample --disable-swscale --disable-postproc --disable-avfilter --disable-network
+            --disable-autodetect --disable-iconv --enable-decoder=xma1,xma2 --disable-debug --enable-small
