@@ -307,7 +307,7 @@ void install_start(App &a, const std::string &path, int forGame)
         snprintf(tid, sizeof tid, "%08X", p.titleId);
         if (forGame < 0) {
             set_message(a, std::string("COGBox doesn't know this version (title ID ") + tid + "). If it is a regional release of "
-                           "Gears of War, 2, 3 or Judgment, add it from that game's page - it will be added as an untested version.", true);
+                           "Gears of War, 2, 3 or Judgment, add it with ADD GAME and choose that game - it will be added as an untested version.", true);
             return;
         }
         p.game = forGame;
