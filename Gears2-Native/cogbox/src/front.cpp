@@ -323,6 +323,11 @@ static void empty_draw(App &a, ImVec2 size, bool nav)
     centred(F_HEAD, FS(F_HEAD) * 1.25f, col::text, tr("Your library is empty"));
     y += S(8);
     centred(F_BODY, FS(F_BODY), col::dim, tr("Add your own copy of Gears of War, Gears of War 2, Gears of War 3 or Gears of War: Judgment - COGBox doesn't include any game files."));
+    y += S(18);
+    // Shagg 1 Nov: what main.cpp takes when dropped on the window (install_start / dlc_packages_in)
+    centred(F_BODY, FS(F_BODY), col::amber, tr("Drag and drop your game files onto this window to add them:"));
+    y += S(4);
+    centred(F_BODY, FS(F_BODY), col::text, tr("a disc image (.iso), a Games on Demand copy, a title update or DLC package, or a folder with the game's default.xex."));
     y += S(22);
     const float bw = T(180), bh = T(36);
     ImGui::SetCursorScreenPos(ImVec2(cx - bw * 0.5f, y));
@@ -402,7 +407,7 @@ void front_draw(App &a, ImVec2 size)
     else {
         // the boxes, farthest first
         // the box gives up height to the bigger text under it (name, status line, buttons, hint line)
-        float under = FS(F_HEAD) * 1.25f + FS(F_BODY) + T(36) + FS(F_SMALL) + S(60);
+        float under = FS(F_HEAD) * 1.25f + FS(F_BODY) + T(36) + FS(F_SMALL) * 2 + S(70);   // Shagg 1 Nov: + the drop tip
         float H = std::min(std::min(size.y * 0.56f, size.y - under - S(100)), size.x * 0.33f / kCoverAspect);
         float cx = size.x * 0.5f, cy = S(90) + H * 0.5f, spacing = H * kCoverAspect * 1.25f;
         std::vector<int> order(lib.begin(), lib.end());
@@ -501,6 +506,13 @@ void front_draw(App &a, ImVec2 size)
                 if (!p.empty()) install_start(a, p, g);
             }
             ImGui::PopStyleColor(2);
+        }
+        // Shagg 1 Nov: the drop tip, under the buttons (and the folder button when it shows)
+        {
+            const bool folderRow = st.ready != R_READY && st.ready != R_NO_PORT;
+            centred(F_SMALL, FS(F_SMALL), col::dim,
+                    tr("Tip: drag and drop a disc image, Games on Demand copy, title update, DLC package or game folder onto this window to add it."),
+                    y + bh + S(14) + (folderRow ? ImGui::GetFrameHeight() + S(8) : 0.0f));
         }
     }   // the carousel (nLib > 0)
 
