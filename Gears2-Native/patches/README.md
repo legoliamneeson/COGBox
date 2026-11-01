@@ -25,6 +25,8 @@ Then move the third-party submodules to the tags in `sdk-pins.txt` and configure
   the Join list). With 3 or more PCs every PC must list all the others.
   Patches 39 and 40 use bare file names: apply 39 inside `src/input/mnk` (`patch -p0`) and 40 inside
   `src/audio/sdl` (`patch -p1`).
+- `sdk-patch52-file-open-failed-observer.diff` (GitHub #54: a failed file open is told to an observer; Judgment's
+  loading-screen cap uses it) comes after patch 49b. Apply it in the SDK root (`git apply`).
 - `sdk-patch15` to `sdk-patch37` are the separate patches that went into `rexglue-sdk.diff`. They're kept
   for reference only, so don't apply them again.
 - `sdk-patch16-zpd-pairing-UNBUILT.diff` was never built. It isn't in any release.

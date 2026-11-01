@@ -236,6 +236,13 @@ void OnGowjFileOpened(std::string_view guest_path, const std::filesystem::path*)
     g_load_last_pkg.store(now);
   }
 }
+// GitHub #54 (a later report): at the end of Monroe Commons the only file sign of the loading screen can be a FAILED
+// lookup of GearGame\Movies\LoadingMovie_<language>.txt (no movie, no *_P.xxx yet). A failed LoadingMovie*.txt / .bik
+// lookup (SDK patch 52) is handled exactly as a successful one: the same trigger as above (it re-arms, is logged, and
+// ends as any window does).
+void OnGowjFileOpenFailed(std::string_view guest_path) {
+  if (ContainsNoCase(guest_path, "loadingmovie")) OnGowjFileOpened(guest_path, nullptr);
+}
 void ReleaseLoadingClamp(int64_t start, const char* why, std::chrono::steady_clock::duration since_start) {
   int64_t expected = start;
   if (g_load_start.compare_exchange_strong(expected, 0)) {
@@ -310,6 +317,12 @@ void GowjInstallLoadingClamp() {
   // Job 666: through the shader reader's observer (it tells ours first), so it doesn't matter which installs first.
   Ue3ShaderPrebuildChainFileOpened(&OnGowjFileOpened);
   REXLOG_INFO("gowj_loading_fps: on - loading screens run at {} fps at most (GitHub #38)", REXCVAR_GET(gowj_loading_fps));
+#if defined(REX_FILESYSTEM_FILE_OPEN_FAILED_OBSERVER)
+  rex::filesystem::SetFileOpenFailedObserver(&OnGowjFileOpenFailed);  // GitHub #54: failed LoadingMovie* lookups too
+#else
+  REXLOG_WARN("gowj_loading_fps: this SDK has no failed-open observer (SDK patch 52); a loading screen that only looks "
+              "up a missing LoadingMovie*.txt keeps the player's limit");
+#endif
 #else
   REXLOG_WARN("gowj_loading_fps: this SDK has no file-open observer (SDK patch 32); loading screens keep the player's limit");
 #endif
