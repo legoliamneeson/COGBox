@@ -1,4 +1,6 @@
 // Layer 0 unit tests: Kenney CC0 controller & mouse prompt glyph asset verification.
+// Contributed by Flippage (COGBox PR #117); portions from gow3-recomp: BSD-3-Clause, Copyright (c) Flippage and the
+// gow3-recomp contributors (THIRD_PARTY_NOTICES.md). The rest is our code (MIT).
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>

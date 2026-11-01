@@ -37,7 +37,7 @@ the ports what an emulator can't easily offer:
 - **HDR10**, **ultrawide 21:9** (all three games), **16x anisotropic filtering**, field of view, and the games' own motion blur, depth of
   field and lens flares as switches.
 - **Split-screen** (Gears 2), **keyboard and mouse** (mouse look without the stick's speed limit, keys you can change),
-  **auto-switching 4x button prompts** (Keyboard & Mouse, Xbox, PlayStation, Nintendo Switch, Steam Deck, and Steam Controller across HUD action prompts, menus, and chainsaw duels; configurable via `--gow_button_prompts=auto|xbox|playstation|switch|steamdeck|steamcontroller|keyboard|original`), **title updates**, **chapter select**.
+  **Xbox and PlayStation controllers** with **auto-switching button prompts** (the game's own for Xbox pads; PlayStation, Switch, Steam Deck, Steam Controller and keyboard prompts as you switch; `--gow_button_prompts=auto|original|xbox|playstation|switch|steamdeck|steamcontroller|keyboard`), **title updates**, **chapter select**.
 - **DLC and mods** - add DLC packages from your console and mods as .zip files on each game's About tab.
 - **Every game language** the US and European releases have (21), chosen per game - the ones on your copy work.
   Japanese (player reports, #103): Gears 3 and Judgment work from a Japanese disc (text and voices). Gears 2 is not

@@ -1,5 +1,7 @@
 // Layer 0 (game-free): catalog of known prompt texture atlases (512x512 HUD action prompts, 256x256 Gears 2 / 3 /
 // Judgment button font sheets, and 256x256 Melee & Chainsaw Duel sheets) and their per-button cell coordinates.
+// Contributed by Flippage (COGBox PR #117); portions from gow3-recomp: BSD-3-Clause, Copyright (c) Flippage and the
+// gow3-recomp contributors (THIRD_PARTY_NOTICES.md). The rest is our code (MIT).
 #include <xenos/renderer/prompt_atlas_catalog.h>
 
 namespace xenos::renderer::prompt {

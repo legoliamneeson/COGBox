@@ -1,4 +1,4 @@
-# Gears2-Native - started from the rexglue project template (`rexglue init`, job 007).
+﻿# Gears2-Native - started from the rexglue project template (`rexglue init`, job 007).
 # Four layers (decision D16, roadmap section 1b): each is its own library, and a layer can only see its own and lower
 # layers' headers, so a wrong-way dependency fails to build.
 cmake_minimum_required(VERSION 3.25)
