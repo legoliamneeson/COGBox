@@ -30,6 +30,7 @@
 #include <string_view>
 #include <cctype>
 #include <filesystem>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -144,6 +145,12 @@ void TickTimeline() {  // the game thread is the only caller
 // alone - cap while loading, release on the first tick it is clear; (2) without one, streamed packages extend the
 // window by at most --gowj_loading_stream_s past the last level package / loading movie; (3) --gowj_loading_max_s
 // ends any loading cap, logged, whatever the signals say.
+// GitHub #77 again (0.3.5: after a checkpoint the cap stayed on until the player paused and resumed): a level package
+// (*_P.xxx) the game opens AGAIN while the cap is on is not a new level change - the game re-reads a persistent package
+// it already has while it plays, and every such re-read used to re-arm the window (since_trigger < 6 s), so the cap
+// only ended when play stopped (the pause menu) [G: the re-read is inferred from "only a pause releases it"; these
+// lines show it]. Now only the loading movie or a level package not yet seen in this window re-arms it, and each
+// trigger is logged (the first 12 per window, then a count), so the next report names what keeps a cap on.
 REXCVAR_DEFINE_INT32(gowj_loading_fps, 30, "Judgment",
                      "GitHub #38: the engine's frame-rate limit while a loading screen runs (0 = no change). Above it a "
                      "loading screen can stay up for ever (the end of Monroe Commons at 162 fps)");
@@ -163,6 +170,16 @@ std::atomic<int64_t> g_load_watchdog{0};      // the last "still loading" line
 // loading, 1 = loading. Hook candidates (addresses to be found in this build): GIsLoading / UGameEngine::LoadMap entry
 // and exit, FFullScreenMovie::GameThreadIsMoviePlaying("LoadingMovie").
 std::atomic<int> g_load_flag{-1};
+// GitHub #77: the level packages that already started or re-armed the current window (cleared when it ends).
+std::mutex g_load_names_mutex;
+std::vector<std::string> g_load_names;
+int g_load_reopens = 0;  // re-reads of a package in g_load_names, ignored as triggers (logged at the release)
+std::string LowerName(std::string_view path) {
+  const size_t slash = path.find_last_of("\\/");
+  std::string n(path.substr(slash == std::string_view::npos ? 0 : slash + 1));
+  for (char& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return n;
+}
 
 bool EndsWithNoCase(std::string_view s, std::string_view tail) {
   if (s.size() < tail.size()) return false;
@@ -183,9 +200,32 @@ void OnGowjFileOpened(std::string_view guest_path, const std::filesystem::path*)
   // GitHub #54 (report 20261030-092812): the loading movie is opened only once a session, so every loading screen after
   // the first ran at the player's limit (162 fps) and the one after Monroe Commons hung again. A level's persistent
   // package (*_P.xxx) is opened by every level change, so it starts the clamp too.
-  if ((EndsWithNoCase(guest_path, ".bik") && ContainsNoCase(guest_path, "loadingmovie")) || EndsWithNoCase(guest_path, "_p.xxx")) {
+  const bool movie = EndsWithNoCase(guest_path, ".bik") && ContainsNoCase(guest_path, "loadingmovie");
+  if (movie || EndsWithNoCase(guest_path, "_p.xxx")) {
+    // GitHub #77: a level package already seen in this window is a re-read, not a level change - it doesn't re-arm.
+    int seen_count = 0;
+    bool reread = false;
+    {
+      std::lock_guard<std::mutex> lock(g_load_names_mutex);
+      const std::string name = LowerName(guest_path);
+      if (g_load_start.load() != 0 && !movie &&
+          std::find(g_load_names.begin(), g_load_names.end(), name) != g_load_names.end()) {
+        reread = true;
+        ++g_load_reopens;
+      } else {
+        if (g_load_start.load() == 0) { g_load_names.clear(); g_load_reopens = 0; }
+        if (!movie) g_load_names.push_back(name);
+      }
+      seen_count = static_cast<int>(g_load_names.size());
+    }
+    if (reread) {
+      g_load_last_pkg.store(now);  // still counts as a streamed package (bounded by gowj_loading_stream_s)
+      return;
+    }
     if (g_load_start.exchange(now) == 0)
       REXLOG_INFO("gowj_loading_fps: cap on - loading screen ({}), engine limit {} fps", guest_path, REXCVAR_GET(gowj_loading_fps));
+    else if (seen_count <= 12)
+      REXLOG_INFO("gowj_loading_fps: cap kept on - {} ({})", movie ? "loading movie" : "new level package", guest_path);
     g_load_last_pkg.store(now);
     g_load_last_trigger.store(now);
   } else if (g_load_start.load() != 0 && EndsWithNoCase(guest_path, ".xxx")) {
@@ -194,9 +234,19 @@ void OnGowjFileOpened(std::string_view guest_path, const std::filesystem::path*)
 }
 void ReleaseLoadingClamp(int64_t start, const char* why, std::chrono::steady_clock::duration since_start) {
   int64_t expected = start;
-  if (g_load_start.compare_exchange_strong(expected, 0))
-    REXLOG_INFO("gowj_loading_fps: cap off - {} after {:.1f} s, the player's own limit again", why,
-                std::chrono::duration<double>(since_start).count());
+  if (g_load_start.compare_exchange_strong(expected, 0)) {
+    size_t levels = 0;
+    int reopens = 0;
+    {
+      std::lock_guard<std::mutex> lock(g_load_names_mutex);
+      levels = g_load_names.size();
+      reopens = g_load_reopens;
+      g_load_names.clear();
+      g_load_reopens = 0;
+    }
+    REXLOG_INFO("gowj_loading_fps: cap off - {} after {:.1f} s, the player's own limit again ({} level package(s), {} "
+                "re-read(s) ignored)", why, std::chrono::duration<double>(since_start).count(), levels, reopens);
+  }
 }
 bool LoadingClampActive() {
   using namespace std::chrono;
