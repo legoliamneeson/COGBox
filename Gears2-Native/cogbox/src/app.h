@@ -160,3 +160,12 @@ bool make_report(App &a, int g, const std::string &sessionDir, const std::string
 std::string newest_session(int g);
 // main.cpp
 void refresh_games(App &a, bool hash);
+// music.cpp (Shagg 1 Nov): the chosen game's menu music in the library - music\<key>.wav beside CogBox.exe
+std::string music_path(int g);
+void music_rescan();                 // looks for the tracks again (also every few seconds by itself)
+bool music_has_track(int g);
+bool music_any_track();
+bool music_on(const App &a);         // CogBox.ini [Launcher] Music
+void music_set_on(App &a, bool on);
+void music_update(App &a);           // once a frame: plays, crossfades, stops while a game runs
+void music_stop();

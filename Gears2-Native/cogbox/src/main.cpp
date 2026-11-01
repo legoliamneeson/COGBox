@@ -364,7 +364,7 @@ const char *pad_name(const App &a, const char *x)
 {
     if (!a.padPs) return x;
     static const char *const map[][2] = { { "A", "Cross" }, { "B", "Circle" }, { "X", "Square" }, { "Y", "Triangle" },
-                                          { "LB", "L1" }, { "RB", "R1" }, { "LT", "L2" }, { "RT", "R2" }, { "Back", "Share" }, { "Start", "Options" } };
+                                          { "LB", "L1" }, { "RB", "R1" }, { "RS", "R3" }, { "LT", "L2" }, { "RT", "R2" }, { "Back", "Share" }, { "Start", "Options" } };
     for (auto &m : map) if (strcmp(m[0], x) == 0) return m[1];
     return x;
 }
@@ -589,9 +589,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             if (e.type == SDL_EVENT_KEY_DOWN) g_lastKeyScancode = (int)e.key.scancode;   // the key's position (page.cpp key capture)
             if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL) a.lastPad = false;
             if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) a.dropped.push_back(e.drop.data);
-            if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && !a.run.proc) { refresh_games(a, false); covers_load(a); }
+            if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && !a.run.proc) { refresh_games(a, false); covers_load(a); music_rescan(); }
         }
         play_poll(a);
+        music_update(a);   // Shagg 1 Nov (music.cpp)
         switch (art_download_poll()) {
         case 2: covers_load(a); set_message(a, "Box art and backgrounds are in the covers folder.", false); break;
         case 3: set_message(a, "The box art couldn't be downloaded - check the internet connection.", true); break;
@@ -660,6 +661,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     a.ini.save();
     if (a.job.state.load() == 1) { a.job.cancel = true; }
     if (a.job.th.joinable()) a.job.th.join();
+    music_stop();
     for (auto &c : a.cover) if (c.tex) SDL_DestroyTexture(c.tex);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
