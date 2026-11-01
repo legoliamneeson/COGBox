@@ -200,7 +200,11 @@ void OnGowjFileOpened(std::string_view guest_path, const std::filesystem::path*)
   // GitHub #54 (report 20261030-092812): the loading movie is opened only once a session, so every loading screen after
   // the first ran at the player's limit (162 fps) and the one after Monroe Commons hung again. A level's persistent
   // package (*_P.xxx) is opened by every level change, so it starts the clamp too.
-  const bool movie = EndsWithNoCase(guest_path, ".bik") && ContainsNoCase(guest_path, "loadingmovie");
+  // GitHub #54 / #77 (reports 20261031-214709, 20261031-105629): the game reads the loading movie's subtitle file at
+  // the start of EVERY loading screen - LoadingMovie_<language>.txt, then LoadingMovie.txt - including the one after
+  // Monroe Commons and a checkpoint reload, while the .bik is opened once a session. So the .txt starts the cap too.
+  const bool movie = ContainsNoCase(guest_path, "loadingmovie") &&
+                     (EndsWithNoCase(guest_path, ".bik") || EndsWithNoCase(guest_path, ".txt"));
   if (movie || EndsWithNoCase(guest_path, "_p.xxx")) {
     // GitHub #77: a level package already seen in this window is a re-read, not a level change - it doesn't re-arm.
     int seen_count = 0;
