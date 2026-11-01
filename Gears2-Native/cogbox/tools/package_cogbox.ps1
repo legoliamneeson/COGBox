@@ -65,6 +65,11 @@ $recipeSrc = Join-Path $launcher 'recipes'   # the copies the launcher uses on t
 foreach ($g in 'gow2', 'gow3', 'gowj', 'gow1') { if (-not (Test-Path (Join-Path $recipeSrc "recipes-$g.rcp"))) { $problems += "missing recipe pack: $recipeSrc\recipes-$g.rcp" } }
 $promptSrc = Join-Path $launcher 'prompts\keyboard'
 if (-not @(Get-ChildItem -LiteralPath $promptSrc -Filter *.overlay -File -ErrorAction SilentlyContinue).Count) { $problems += "no keyboard prompt overlays in $promptSrc" }
+# 0.3.7 (PR #117): the controller prompt glyphs (Kenney, CC0). Every port looks next to its exe, then one and two folders
+# up (prompt_overlay_compositor.cpp ResolveGlyphsDir); all ports are <game>\<port>\, so one copy at the zip's top level,
+# assets\glyphs\, serves them all.
+$glyphSrc = Join-Path (Split-Path -Parent $cogbox) 'assets\glyphs'
+foreach ($f in 'LICENSE.txt', 'xbox\a.png') { if (-not (Test-Path (Join-Path $glyphSrc $f))) { $problems += "missing glyph file: $glyphSrc\$f" } }
 if ($problems.Count) { $problems | ForEach-Object { Write-Host "PROBLEM: $_" }; Write-Host 'RESULT: FAIL (nothing written)'; exit 1 }
 
 $name = "COGBox-$Version"
@@ -97,9 +102,12 @@ $rd = Join-Path $stage 'recipes'; New-Item -ItemType Directory -Force $rd | Out-
 foreach ($g in 'gow2', 'gow3', 'gowj', 'gow1') { Copy-Item (Join-Path $recipeSrc "recipes-$g.rcp") $rd }
 $pd = Join-Path $stage 'prompts\keyboard'; New-Item -ItemType Directory -Force $pd | Out-Null
 Copy-Item (Join-Path $promptSrc '*.overlay') $pd
+$gd = Join-Path $stage 'assets'; New-Item -ItemType Directory -Force $gd | Out-Null
+Copy-Item -LiteralPath $glyphSrc -Destination $gd -Recurse   # -> assets\glyphs\ (LICENSE.txt + one folder per style)
 Copy-Item (Join-Path (Split-Path -Parent $cogbox) 'LICENSE') (Join-Path $stage 'LICENSE.txt')
 $lic = Join-Path $stage 'licenses'; New-Item -ItemType Directory -Force $lic | Out-Null
 Copy-Item (Join-Path $cogbox 'licenses\*') $lic
+Copy-Item (Join-Path $glyphSrc 'LICENSE.txt') (Join-Path $lic 'Kenney-Input-Prompts-LICENSE.txt')
 foreach ($pr in $projects) {
   foreach ($f in 'LICENSE', 'THIRD_PARTY_NOTICES.md') {
     $src = Join-Path "$docs\$pr" $f
