@@ -120,6 +120,8 @@ work the same way; the steps below use Radmin VPN.
    (next to CogBox.exe) and add one line with the OTHER players' addresses, commas between several:
        --net_peer_ip=26.10.20.30
    Save it, restart the game and try again.
+   With --net_peer_ip set, the game sends its "find games" messages only to the addresses listed
+   there, so with 3 or more PCs every PC must list ALL the other PCs (commas between them).
 
 If it doesn't work
 - Can't select System Link / "No Network Connection": the box in step 1 is not ticked, or this is

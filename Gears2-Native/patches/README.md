@@ -18,7 +18,11 @@ Then move the third-party submodules to the tags in `sdk-pins.txt` and configure
 ## What the other files are
 
 - `rexglue-sdk.diff` is patches 1-37 combined.
-- `sdk-patch38-*.diff` to `sdk-patch45-*.diff` came after it. Apply them in number order on top of it.
+- `sdk-patch38-*.diff` to `sdk-patch50-*.diff` came after it. Apply them in number order on top of it
+  (there is no separate patch 49: `sdk-patch49b-system-link.diff` replaced it).
+- `sdk-patch50-system-link-peers.diff` (by HubertFer, GitHub #72): with `net_peer_ip` set, System Link
+  broadcasts go only to the listed PCs instead of the subnet broadcast as well (no more duplicate games in
+  the Join list). With 3 or more PCs every PC must list all the others.
   Patches 39 and 40 use bare file names: apply 39 inside `src/input/mnk` (`patch -p0`) and 40 inside
   `src/audio/sdl` (`patch -p1`).
 - `sdk-patch15` to `sdk-patch37` are the separate patches that went into `rexglue-sdk.diff`. They're kept
