@@ -18,9 +18,18 @@ Then move the third-party submodules to the tags in `sdk-pins.txt` and configure
 ## What the other files are
 
 - `rexglue-sdk.diff` is patches 1-37 combined.
-- `sdk-patch38-*.diff` to `sdk-patch45-*.diff` came after it. Apply them in number order on top of it.
+- `sdk-patch38-*.diff` to `sdk-patch50-*.diff` came after it. Apply them in number order on top of it
+  (there is no separate patch 49: `sdk-patch49b-system-link.diff` replaced it).
+- `sdk-patch50-system-link-peers.diff` (by HubertFer, GitHub #72): with `net_peer_ip` set, System Link
+  broadcasts go only to the listed PCs instead of the subnet broadcast as well (no more duplicate games in
+  the Join list). With 3 or more PCs every PC must list all the others.
   Patches 39 and 40 use bare file names: apply 39 inside `src/input/mnk` (`patch -p0`) and 40 inside
   `src/audio/sdl` (`patch -p1`).
+- `sdk-patch52-file-open-failed-observer.diff` (GitHub #54: a failed file open is told to an observer; Judgment's
+  loading-screen cap uses it) comes after patch 49b. Apply it in the SDK root (`git apply`).
+- `sdk-patch53-joystick-background-events.diff` (GitHub #108: the game's SDL input sets
+  SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, as the launcher does, and rex_app.cpp no longer zeroes the pad while
+  the window is unfocused) comes after patch 52. Apply it in the SDK root.
 - `sdk-patch15` to `sdk-patch37` are the separate patches that went into `rexglue-sdk.diff`. They're kept
   for reference only, so don't apply them again.
 - `sdk-patch16-zpd-pairing-UNBUILT.diff` was never built. It isn't in any release.

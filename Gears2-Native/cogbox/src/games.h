@@ -76,6 +76,10 @@ struct GameState {
     std::string exe() const { return useUpdate && !portExeTu.empty() ? portExeTu : (portExeDisc.empty() ? portExeTu : portExeDisc); }
 };
 
+// Shagg 1 Nov: the library carousel shows only the games the player has added - their copy or its title update is
+// there, or a folder they added is gone for now (its drive unplugged), so they see why it can't start.
+inline bool game_in_library(const GameState &st) { return !st.dataDir.empty() || !st.updateDir.empty() || st.ready == R_COPY_MISSING; }
+
 std::string game_root(int g);              // <exe dir>\Gears2
 std::string game_user_dir(int g);
 std::string game_logs_dir(int g);

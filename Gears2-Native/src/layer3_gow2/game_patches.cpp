@@ -26,6 +26,7 @@
 // All off by default except the two texture streaming switches (on since job 154: job 153 passed - notes/51 section 12). The Black Shading Fix lives in untiled.cpp (on by default). The other patches in that file are
 // emulator workarounds or cheap hacks and are deliberately not ported (D28).
 #include <rex/cvar.h>
+#include <rex/filesystem/vfs.h>
 #include <rex/logging/macros.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
@@ -43,10 +44,13 @@
 #include <windows.h>
 #endif
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <string_view>
 #include <algorithm>
 #include <cmath>
 
@@ -421,3 +425,58 @@ void Gow2ApplyDataPatchesIfRequested(rex::Runtime* runtime) {
 // The renderer translates each one and has the driver build it before its first draw (XenosGuestShaderCreated).
 void Gow2ShaderCreatedPixel(PPCRegister& r6, PPCRegister& r27) { XenosGuestShaderCreated(false, r6.u32, r27.u32); }
 void Gow2ShaderCreatedVertex(PPCRegister& r4, PPCRegister& r28) { XenosGuestShaderCreated(true, r4.u32, r28.u32); }
+
+// GitHub #90 (French / Italian voices fall back to English): logging only, nothing changes. Every file the game opens
+// whose name looks localized (_LOC_, _FRA, _ITA, _DEU, _ESN, _INT, or a .int/.fra/.ita/.deu/.esn file) is logged with
+// the language the runtime was given (--user_language), the first 200 of them, so a report shows which language's
+// packages the game asked for.
+REXCVAR_DEFINE_BOOL(gow2_loc_log, true, "Gears2", "GitHub #90: log the localized files the game opens (first 200)");
+
+void Ue3ShaderPrebuildChainFileOpened(void (*listener)(std::string_view, const std::filesystem::path*));  // shader_prebuild.cpp
+
+namespace {
+std::atomic<int> g_loc_log_lines{0};
+constexpr int kLocLogMax = 200;
+
+bool Gow2ContainsNoCase(std::string_view s, std::string_view needle) {  // needle in lower case
+  for (size_t i = 0; i + needle.size() <= s.size(); ++i) {
+    size_t k = 0;
+    while (k < needle.size() && std::tolower(static_cast<unsigned char>(s[i + k])) == needle[k]) ++k;
+    if (k == needle.size()) return true;
+  }
+  return false;
+}
+bool Gow2EndsWithNoCase(std::string_view s, std::string_view tail) {  // tail in lower case
+  if (s.size() < tail.size()) return false;
+  for (size_t i = 0; i < tail.size(); ++i)
+    if (std::tolower(static_cast<unsigned char>(s[s.size() - tail.size() + i])) != tail[i]) return false;
+  return true;
+}
+bool Gow2LooksLocalized(std::string_view path) {
+  const size_t slash = path.find_last_of("\\/");
+  const std::string_view name = slash == std::string_view::npos ? path : path.substr(slash + 1);
+  for (const std::string_view tag : {"_loc_", "_fra.", "_ita.", "_deu.", "_esn.", "_int."})
+    if (Gow2ContainsNoCase(name, tag)) return true;
+  for (const std::string_view ext : {".int", ".fra", ".ita", ".deu", ".esn"})
+    if (Gow2EndsWithNoCase(name, ext)) return true;
+  return false;
+}
+void Gow2OnFileOpenedLoc(std::string_view guest_path, const std::filesystem::path*) {
+  if (!Gow2LooksLocalized(guest_path)) return;
+  const int n = g_loc_log_lines.fetch_add(1, std::memory_order_relaxed);
+  if (n >= kLocLogMax) return;
+  REXLOG_INFO("gow2_loc_log: opened {} (user_language {}){}", guest_path, rex::cvar::GetFlagByName("user_language"),
+              n + 1 == kLocLogMax ? " - last line of this log (200)" : "");
+}
+}  // namespace
+
+void Gow2InstallLocLogIfRequested() {
+  if (!REXCVAR_GET(gow2_loc_log)) return;
+#if defined(REX_FILESYSTEM_FILE_OPEN_OBSERVER)
+  Ue3ShaderPrebuildChainFileOpened(&Gow2OnFileOpenedLoc);  // through the shader reader's observer (either order works)
+  REXLOG_INFO("gow2_loc_log: on - user_language {}; localized files the game opens are logged (GitHub #90, first {})",
+              rex::cvar::GetFlagByName("user_language"), kLocLogMax);
+#else
+  REXLOG_WARN("gow2_loc_log: this SDK has no file-open observer (SDK patch 32); localized files are not logged");
+#endif
+}

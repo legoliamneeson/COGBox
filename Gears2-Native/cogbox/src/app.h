@@ -16,7 +16,7 @@
 #include "gears_settings.h"
 #include "util.h"
 
-#define COGBOX_VERSION "0.3.5"
+#define COGBOX_VERSION "0.3.6"
 #define COGBOX_NAME "COGBox"
 
 namespace gs = cogbox::gears;
@@ -120,6 +120,10 @@ void front_draw(App &a, ImVec2 size);
 void draw_box(App &a, int g, ImVec2 center, float height, float yawDeg, float light, bool reflection);
 void covers_load(App &a);
 void backdrop_draw(App &a, ImDrawList *dl, ImVec2 size, int g, float alpha);
+// Shagg 1 Nov: the games in the library carousel (added ones only, release order) and a game's place in it (-1: not there)
+std::vector<int> library_games(const App &a);
+int library_slot(const App &a, int g);
+void add_game_ask(App &a);           // the "Add a game" question: which game (or let COGBox tell), then a file or a folder
 void art_download_start();
 int art_download_poll();
 // page.cpp
@@ -156,3 +160,13 @@ bool make_report(App &a, int g, const std::string &sessionDir, const std::string
 std::string newest_session(int g);
 // main.cpp
 void refresh_games(App &a, bool hash);
+// music.cpp (Shagg 1 Nov, the Athelas design): the chosen game's own menu music in the library, read from the player's copy
+bool music_has_source(const App &a, int g);   // the game has a copy to read its music from
+bool music_any_source(const App &a);          // ... a game in the library has
+bool music_on(const App &a);                  // CogBox.ini [Launcher] Music
+void music_set_on(App &a, bool on);
+void music_update(App &a);                    // once a frame: what to play, on / off, paused while a game runs
+void music_stop();                            // at exit
+int music_test(const std::string &key, const std::string &copy, const std::string &report);   // --musictest
+int music_scan(const std::string &folder, const std::string &report);                         // --musicscan
+int music_probe(const std::string &file, const std::string &report);                          // --musicprobe

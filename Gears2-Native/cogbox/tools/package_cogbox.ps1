@@ -84,6 +84,10 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 
 # ---- Copy -----------------------------------------------------------------------------------------------------------
 Copy-Item (Join-Path $launcher 'CogBox.exe'), (Join-Path $launcher 'SDL3.dll') $stage
+# The library music's XMA decoder (FFmpeg, LGPL 2.1, separate DLLs; licenses\FFmpeg-*.txt): optional - without them the
+# library is silent, so a build without them still packages (with a warning).
+$ff = @(Get-ChildItem $launcher -Filter 'av*-*.dll' -ErrorAction SilentlyContinue)
+if ($ff.Count -ge 2) { $ff | Copy-Item -Destination $stage } else { Write-Warning 'no avcodec / avutil DLLs in cogbox\build: the library music will be silent' }
 Copy-Item (Join-Path $cogbox 'README.txt') $stage
 # Launcher translations (0.2.0): cogbox\lang\<code>.txt -> lang\ beside CogBox.exe.
 $langSrc = Join-Path $cogbox 'lang'

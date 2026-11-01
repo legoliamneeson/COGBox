@@ -510,7 +510,7 @@ void InstallModOverlay(rex::Runtime* runtime, std::map<std::string, std::filesys
       std::ofstream o(tocOut, std::ios::binary | std::ios::trunc);
       o << outText;
       if (o) map[tl] = tocOut;
-      REXLOG_INFO("ue3_mods: {}: {} line(s) changed or added", tname, changed);
+      REXLOG_INFO("ue3_mods: {}: {} line(s) changed or added (given the replaced files' size and MD5)", tname, changed);
     }
     const std::string devname = std::string("\\Device\\Ue3ModOverlay") + std::to_string(devices);
     auto dev = std::make_unique<ModOverlayDevice>(devname, topdir, map, dirsByTop[top]);
@@ -611,6 +611,30 @@ void Ue3InstallConfigEditsIfRequested(rex::Runtime* runtime) {
     ++written;
   }
   if (!written) return;
+  // #111: the disc's table of contents (<top folder>\*TOC*.txt) lists each bundle's size and MD5; with only the hash
+  // table updated, the disc version reports a dirty disc a few seconds in. When there is one, the edited bundles go
+  // through the mods' folder view, whose table-of-contents writer gives their lines the edited size and MD5.
+  bool with_toc = false;
+  {
+    std::string top = rel;
+    for (char& c : top) if (c == '/') c = '\\';
+    while (!top.empty() && top.front() == '\\') top.erase(0, 1);
+    top = top.substr(0, top.find('\\'));
+    const fs::path topdir = runtime->game_data_root() / rex::to_path(top);
+    if (!top.empty() && fs::is_directory(topdir, ec))
+      for (const auto& e : fs::directory_iterator(topdir, ec)) {
+        const std::string tl = ModLower(rex::path_to_utf8(e.path().filename()));
+        if (e.is_regular_file() && tl.find("toc") != std::string::npos && tl.ends_with(".txt")) with_toc = true;
+      }
+  }
+  if (with_toc && mods.empty()) {
+    for (const std::string& n : names)
+      if (fs::exists(out_dir / n, ec)) mods[RelKey(rel + "\\" + n)] = out_dir / n;
+    REXLOG_INFO("ue3_ini_edits: {} edit(s) applied to {} config bundle(s); {} hash table entries updated; table of "
+                "contents found - shown through the mods' folder view, which rewrites their table-of-contents lines",
+                edits.size(), written, hashed);
+    return;
+  }
   if (!mods.empty()) {   // 0.2.0: into the mods' overlay (the mods' own copies of these bundles were the ones edited)
     for (const std::string& n : names)
       if (fs::exists(out_dir / n, ec)) mods[RelKey(rel + "\\" + n)] = out_dir / n;

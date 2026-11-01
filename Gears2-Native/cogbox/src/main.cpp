@@ -128,6 +128,13 @@ static void answered(App &a)
     else if (m.tag == "turec") {   // 0.2.0: Gears 2 / 3 without Title Update 6
         if (m.checked && g >= 0) { a.ini.seti("Notices", std::string("TuRecommendNever_") + game_def(g).key, 1); a.ini.save(); }
     }
+    else if (m.tag == "addgame" && (m.answer == 0 || m.answer == 1)) {   // Shagg 1 Nov: ADD GAME (front.cpp add_game_ask)
+        const int forGame = m.listSel <= 0 ? -1 : game_at_slot(m.listSel - 1);
+        std::string p = m.answer == 0 ? pick_file(L"Choose your copy: a disc image (.iso), a Games on Demand file, a title update, or default.xex in a folder",
+                                                  L"Xbox 360 games and updates\0*.iso;*.xex;*.*\0All files\0*.*\0")
+                                      : pick_folder(L"Choose the folder with your game's default.xex (or a Games on Demand / title update folder)");
+        if (!p.empty()) install_start(a, p, forGame);
+    }
     else if (m.tag == "replace" && m.answer == 0) install_confirmed(a);
     else if (m.tag == "autoset" && m.answer == 0) auto_settings_apply(a, m.game);   // Shagg 29 Oct
     else if (m.tag == "dlcremove" && m.answer == 0) dlc_remove_confirmed(a);   // 0.2.0
@@ -310,15 +317,17 @@ static void draw_ui(App &a, ImVec2 size)
     ImDrawList *bg = ImGui::GetBackgroundDrawList();
     static const ImVec4 tints[G_COUNT] = { ImVec4(0.30f, 0.45f, 0.70f, 1), ImVec4(0.75f, 0.50f, 0.22f, 1), ImVec4(0.70f, 0.22f, 0.16f, 1),
                                            ImVec4(0.45f, 0.52f, 0.40f, 1) };
-    // the tint follows the box in front (blended while turning); carPos is a carousel slot (front.cpp)
-    const int s0 = (int)floorf(a.carPos), g0 = game_at_slot(s0), g1 = game_at_slot(s0 + 1);
-    float f = a.carPos - floorf(a.carPos);
+    // the tint follows the box in front (blended while turning); carPos is a slot of the library carousel (front.cpp)
+    const std::vector<int> lib = library_games(a);
+    const int nLib = std::max(1, (int)lib.size()), s0 = (int)floorf(a.carPos);
+    const int g0 = lib.empty() ? a.front : lib[(s0 % nLib + nLib) % nLib], g1 = lib.empty() ? a.front : lib[((s0 + 1) % nLib + nLib) % nLib];
+    float f = lib.empty() ? 0.0f : a.carPos - floorf(a.carPos);
     int tg = a.screen == SCR_PAGE ? a.page : -1;
     ImVec4 tint = tg >= 0 ? tints[tg] : ImVec4(tints[g0].x * (1 - f) + tints[g1].x * f, tints[g0].y * (1 - f) + tints[g1].y * f, tints[g0].z * (1 - f) + tints[g1].z * f, 1);
     th_background(bg, size, now, tint);
     // the game's own background art (when downloaded), crossfading with the box in front, darker on a page
     if (tg >= 0) backdrop_draw(a, bg, size, tg, 0.85f);   // the settings page too shows the game's art (Shagg 18:41)
-    else { backdrop_draw(a, bg, size, g0, 0.85f * (1 - f)); backdrop_draw(a, bg, size, g1, 0.85f * f); }
+    else if (!lib.empty()) { backdrop_draw(a, bg, size, g0, 0.85f * (1 - f)); backdrop_draw(a, bg, size, g1, 0.85f * f); }
     if (tg < 0) bg->AddRectFilledMultiColor(ImVec2(0, size.y * 0.45f), size, IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 200), IM_COL32(0, 0, 0, 200));
 
     // the zoom between the carousel and a page: darkens, switches half way, lightens (0.5 s)
@@ -355,7 +364,7 @@ const char *pad_name(const App &a, const char *x)
 {
     if (!a.padPs) return x;
     static const char *const map[][2] = { { "A", "Cross" }, { "B", "Circle" }, { "X", "Square" }, { "Y", "Triangle" },
-                                          { "LB", "L1" }, { "RB", "R1" }, { "LT", "L2" }, { "RT", "R2" }, { "Back", "Share" }, { "Start", "Options" } };
+                                          { "LB", "L1" }, { "RB", "R1" }, { "RS", "R3" }, { "LT", "L2" }, { "RT", "R2" }, { "Back", "Share" }, { "Start", "Options" } };
     for (auto &m : map) if (strcmp(m[0], x) == 0) return m[1];
     return x;
 }
@@ -452,6 +461,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         int argc = 0;
         wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         if (argv && argc >= 2 && wcscmp(argv[1], L"--x360test") == 0) return x360test(argc, argv);
+        // the library music's test switches (music.cpp): one game's track from one copy / every long wave in a game folder
+        if (argv && argc >= 5 && wcscmp(argv[1], L"--musictest") == 0) return music_test(narrow(argv[2]), narrow(argv[3]), narrow(argv[4]));
+        if (argv && argc >= 4 && wcscmp(argv[1], L"--musicscan") == 0) return music_scan(narrow(argv[2]), narrow(argv[3]));
+        if (argv && argc >= 4 && wcscmp(argv[1], L"--musicprobe") == 0) return music_probe(narrow(argv[2]), narrow(argv[3]));
         // 0.2.0: a game's desktop shortcut starts COGBox with --play <gears1 | gears2 | gears3 | judgment>
         if (argv && argc >= 3 && wcscmp(argv[1], L"--play") == 0) g_playArg = narrow(argv[2]);
         if (argv) LocalFree(argv);
@@ -534,7 +547,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     if (a.st[a.front].ready != R_READY)
         for (int g = 0; g < G_COUNT; g++) if (a.st[g].ready == R_READY) { a.front = g; break; }
     if (const char *t = getenv("COGBOX_FRONT")) a.front = std::max(0, std::min(G_COUNT - 1, atoi(t)));
-    a.carPos = (float)game_slot(a.front);
+    a.carPos = (float)std::max(0, library_slot(a, a.front));
     if (const char *t = getenv("COGBOX_PAGE")) {
         a.page = std::max(0, std::min(G_COUNT - 1, atoi(t)));
         const char *c = strchr(t, ':');
@@ -560,7 +573,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     if (!g_playArg.empty()) {
         for (int g = 0; g < G_COUNT; g++) {
             if (g_playArg != game_def(g).key) continue;
-            a.front = g; a.carPos = (float)game_slot(g);
+            a.front = g; a.carPos = (float)std::max(0, library_slot(a, g));
             if (a.st[g].ready == R_READY && !a.modal.open) play_start(a, g);
         }
     }
@@ -583,6 +596,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && !a.run.proc) { refresh_games(a, false); covers_load(a); }
         }
         play_poll(a);
+        music_update(a);   // Shagg 1 Nov (music.cpp)
         switch (art_download_poll()) {
         case 2: covers_load(a); set_message(a, "Box art and backgrounds are in the covers folder.", false); break;
         case 3: set_message(a, "The box art couldn't be downloaded - check the internet connection.", true); break;
@@ -651,6 +665,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     a.ini.save();
     if (a.job.state.load() == 1) { a.job.cancel = true; }
     if (a.job.th.joinable()) a.job.th.join();
+    music_stop();
     for (auto &c : a.cover) if (c.tex) SDL_DestroyTexture(c.tex);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();

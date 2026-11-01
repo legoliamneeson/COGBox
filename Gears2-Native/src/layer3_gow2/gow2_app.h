@@ -26,6 +26,7 @@ void XenosSetUiContext(rex::ui::WindowedAppContext* ui);  // layer 0 fps_bar.cpp
 #include <xdk7645/stage1.h>
 
 void Gow2ApplyDataPatchesIfRequested(rex::Runtime* runtime);
+void Gow2InstallLocLogIfRequested();  // game_patches.cpp (GitHub #90)
 REXCVAR_DECLARE(bool, gow2_mute_unfocused);  // game_patches.cpp (patch 0130)
 
 class Gow2App : public rex::ReXApp {
@@ -64,6 +65,7 @@ class Gow2App : public rex::ReXApp {
     XenosInstallShaderDumpIfRequested();
     XenosInstallShaderWatchIfRequested();
     XenosInstallRendererIfRequested(runtime(), {0x1E6883FCCDE1F688ull, 0xA4A965C189287B99ull, 0xB6C9863F710683ECull});
+    Gow2InstallLocLogIfRequested();  // GitHub #90: before the game opens its localized packages
     Ue3InstallShaderPrebuildIfRequested();  // patch 0068: after the renderer (it asks whether the renderer wants them)
     XenosInstallQueryLogIfRequested(runtime(), {-32});
     XenosInstallStateCoverageIfRequested();

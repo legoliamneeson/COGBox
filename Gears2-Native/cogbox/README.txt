@@ -120,6 +120,8 @@ work the same way; the steps below use Radmin VPN.
    (next to CogBox.exe) and add one line with the OTHER players' addresses, commas between several:
        --net_peer_ip=26.10.20.30
    Save it, restart the game and try again.
+   With --net_peer_ip set, the game sends its "find games" messages only to the addresses listed
+   there, so with 3 or more PCs every PC must list ALL the other PCs (commas between them).
 
 If it doesn't work
 - Can't select System Link / "No Network Connection": the box in step 1 is not ticked, or this is
@@ -176,6 +178,6 @@ anywhere. Attach it to an issue at https://github.com/Shagg88/COGBox/issues
 Licences
 --------
 COGBox and the ports' own code are under the MIT licence (LICENSE.txt). The libraries, fonts and
-vendor upscalers included (SDL3, Dear ImGui, miniz, stb, the rexglue SDK, AMD FidelityFX, NVIDIA
+vendor upscalers included (SDL3, Dear ImGui, miniz, stb, FFmpeg's XMA decoder, the rexglue SDK, AMD FidelityFX, NVIDIA
 DLSS, Intel XeSS, the DirectX Shader Compiler) come under their own terms, in the licenses folder.
 Fonts: Anton, Barlow and Barlow Condensed, under the SIL Open Font License 1.1.

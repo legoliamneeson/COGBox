@@ -261,10 +261,26 @@ void draw_box(App &a, int g, ImVec2 center, float H, float yawDeg, float light, 
 }
 
 // ---- the carousel ----------------------------------------------------------------------------------------------------
-// The carousel works in slots (release order, game_at_slot); a.front stays a game index, a.carPos is a slot position.
-static float wrap_d(float d)   // -G_COUNT/2 .. G_COUNT/2
+// The carousel works in slots of the library (the added games in release order, library_games); a.front stays a game
+// index, a.carPos is a slot position in the library.
+std::vector<int> library_games(const App &a)
 {
-    const float n = (float)G_COUNT, half = n * 0.5f;
+    std::vector<int> v;
+    for (int s = 0; s < G_COUNT; s++)
+        if (game_in_library(a.st[game_at_slot(s)])) v.push_back(game_at_slot(s));
+    return v;
+}
+
+int library_slot(const App &a, int g)
+{
+    const std::vector<int> v = library_games(a);
+    for (size_t i = 0; i < v.size(); i++) if (v[i] == g) return (int)i;
+    return -1;
+}
+
+static float wrap_d(float d, int count)   // -count/2 .. count/2
+{
+    const float n = (float)std::max(1, count), half = n * 0.5f;
     while (d > half) d -= n;
     while (d < -half) d += n;
     return d;
@@ -272,8 +288,54 @@ static float wrap_d(float d)   // -G_COUNT/2 .. G_COUNT/2
 
 static void turn(App &a, int dir)
 {
-    a.front = game_at_slot(game_slot(a.front) + dir);
+    const std::vector<int> lib = library_games(a);
+    const int n = (int)lib.size();
+    if (n == 0) return;
+    const int s = std::max(0, library_slot(a, a.front));
+    a.front = lib[((s + dir) % n + n) % n];
     a.ini.seti("Front", "Box", a.front);
+}
+
+// Shagg 1 Nov: one place to add any game - the carousel only has the games already added
+void add_game_ask(App &a)
+{
+    ask(a, "addgame", -1, "Add a game",
+        "Choose your copy: a disc image (.iso), a Games on Demand file, a title update, or a folder with default.xex. "
+        "COGBox tells which game it is by itself - choose the game below only for a regional release it doesn't know.",
+        { "Choose a file", "Choose a folder", "Cancel" });
+    a.modal.list.push_back(tr("Find out from the file"));
+    for (int s = 0; s < G_COUNT; s++) a.modal.list.push_back(game_def(game_at_slot(s)).name);
+}
+
+// No game added yet: a short welcome in place of the carousel, with the way to add one
+static void empty_draw(App &a, ImVec2 size, bool nav)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const float cx = size.x * 0.5f, wrap = std::min(size.x - S(120), S(720));
+    float y = size.y * 0.30f;
+    th_cog(dl, ImVec2(cx, y), S(34), 10, (float)ImGui::GetTime() * 0.15f, U(col::redHi, 0.9f), U(ImVec4(0.03f, 0.03f, 0.035f, 1)));
+    y += S(54);
+    auto centred = [&](ImFont *f, float fs, ImVec4 c, const char *t) {
+        ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, wrap, t);
+        dl->AddText(f, fs, ImVec2(cx - ts.x * 0.5f, y), U(c), t, nullptr, wrap);
+        y += ts.y;
+    };
+    centred(F_HEAD, FS(F_HEAD) * 1.25f, col::text, tr("Your library is empty"));
+    y += S(8);
+    centred(F_BODY, FS(F_BODY), col::dim, tr("Add your own copy of Gears of War, Gears of War 2, Gears of War 3 or Gears of War: Judgment - COGBox doesn't include any game files."));
+    y += S(18);
+    // Shagg 1 Nov: what main.cpp takes when dropped on the window (install_start / dlc_packages_in)
+    centred(F_BODY, FS(F_BODY), col::amber, tr("Drag and drop your game files onto this window to add them:"));
+    y += S(4);
+    centred(F_BODY, FS(F_BODY), col::text, tr("a disc image (.iso), a Games on Demand copy, a title update or DLC package, or a folder with the game's default.xex."));
+    y += S(22);
+    const float bw = T(180), bh = T(36);
+    ImGui::SetCursorScreenPos(ImVec2(cx - bw * 0.5f, y));
+    const bool busy = a.job.state.load() == 1;
+    if (th_button_red("ADD A GAME", ImVec2(bw, bh), !busy, F_HEAD, a.padConnected) ||
+        (nav && !busy && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||
+                          ImGui::IsKeyPressed(ImGuiKey_GamepadBack, false))))
+        add_game_ask(a);
 }
 
 static std::string last_played_text(int64_t t)
@@ -315,12 +377,23 @@ void front_draw(App &a, ImVec2 size)
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) a.frontSel = 1;
         if (ImGui::IsWindowHovered() && io.MouseWheel != 0) turn(a, io.MouseWheel > 0 ? -1 : 1);
     }
+    // Shagg 1 Nov: only the added games are on the carousel. When that set changes (a copy added, a drive unplugged),
+    // the carousel jumps to the box in front instead of turning through slots that moved.
+    const std::vector<int> lib = library_games(a);
+    const int nLib = (int)lib.size();
+    {
+        static unsigned shown = ~0u;
+        unsigned mask = 0;
+        for (int g : lib) mask |= 1u << g;
+        if (nLib > 0 && library_slot(a, a.front) < 0) { a.front = lib[0]; shown = ~0u; }
+        if (mask != shown) { shown = mask; a.carPos = (float)std::max(0, library_slot(a, a.front)); a.restSince = now; }
+    }
     // ease the short way round
-    float target = (float)game_slot(a.front), d = wrap_d(target - a.carPos);
+    float target = (float)std::max(0, library_slot(a, a.front)), d = wrap_d(target - a.carPos, nLib);
     float step = std::min(1.0f, io.DeltaTime * 9.0f);
     if (fabsf(d) < 0.002f) { if (a.carPos != target) a.restSince = now; a.carPos = target; }
     else a.carPos += d * step;
-    a.carPos = fmodf(a.carPos + G_COUNT, (float)G_COUNT);
+    a.carPos = fmodf(a.carPos + std::max(1, nLib), (float)std::max(1, nLib));
 
     // the corner mark
     {
@@ -330,109 +403,118 @@ void front_draw(App &a, ImVec2 size)
         dl->AddText(F_SMALL, FS(F_SMALL), ImVec2(m.x + S(44), m.y + FS(F_TITLE) + S(2)), U(col::dim), (tr(std::string("Gears of War native PC ports  -  launcher")) + " " COGBOX_VERSION).c_str());
     }
 
-    // the boxes, farthest first
-    // the box gives up height to the bigger text under it (name, status line, buttons, hint line)
-    float under = FS(F_HEAD) * 1.25f + FS(F_BODY) + T(36) + FS(F_SMALL) + S(60);
-    float H = std::min(std::min(size.y * 0.56f, size.y - under - S(100)), size.x * 0.33f / kCoverAspect);
-    float cx = size.x * 0.5f, cy = S(90) + H * 0.5f, spacing = H * kCoverAspect * 1.25f;
-    int order[G_COUNT];
-    for (int i = 0; i < G_COUNT; i++) order[i] = i;
-    std::sort(order, order + G_COUNT, [&](int x, int y) { return fabsf(wrap_d(game_slot(x) - a.carPos)) > fabsf(wrap_d(game_slot(y) - a.carPos)); });
-    for (int k = 0; k < G_COUNT; k++) {
-        int g = order[k];
-        float dd = wrap_d(game_slot(g) - a.carPos), ad = std::min(1.0f, fabsf(dd));
-        float scale = 1.0f - 0.30f * ad, h = H * scale;
-        float yaw = std::max(-1.0f, std::min(1.0f, dd)) * 35.0f;
-        float light = 1.0f - 0.45f * ad;
-        bool ready = a.st[g].ready == R_READY;
-        if (!ready) light *= 0.55f;
-        ImVec2 c(cx + dd * spacing, cy + (H - h) * 0.5f);
-        // a click on a side box turns to it; on the front box, plays (when ready) or opens the page
-        ImVec2 r0(c.x - h * kCoverAspect * 0.5f, c.y - h * 0.5f), r1(c.x + h * kCoverAspect * 0.5f, c.y + h * 0.5f);
-        bool hov = nav && ImGui::IsMouseHoveringRect(r0, r1) && ImGui::IsWindowHovered();
-        if (hov && ad < 0.1f) light = std::min(1.0f, light * 1.12f + 0.04f);
-        int v0 = ImGui::GetWindowDrawList()->VtxBuffer.Size;
-        draw_box(a, g, c, h, yaw, light, true);
-        // boxes not in front: see-through (Shagg 18:41), more so the further round they are
-        float alpha = 1.0f - 0.45f * ad;
-        ImDrawList *bdl = ImGui::GetWindowDrawList();
-        for (int vi = v0; alpha < 0.999f && vi < bdl->VtxBuffer.Size; vi++) {
-            ImU32 &c32 = bdl->VtxBuffer[vi].col;
-            c32 = (c32 & 0x00FFFFFF) | ((ImU32)(((c32 >> 24) & 0xFF) * alpha) << 24);
+    if (nLib == 0) empty_draw(a, size, nav);
+    else {
+        // the boxes, farthest first
+        // the box gives up height to the bigger text under it (name, status line, buttons, hint line)
+        float under = FS(F_HEAD) * 1.25f + FS(F_BODY) + T(36) + FS(F_SMALL) * 2 + S(70);   // Shagg 1 Nov: + the drop tip
+        float H = std::min(std::min(size.y * 0.56f, size.y - under - S(100)), size.x * 0.33f / kCoverAspect);
+        float cx = size.x * 0.5f, cy = S(90) + H * 0.5f, spacing = H * kCoverAspect * 1.25f;
+        std::vector<int> order(lib.begin(), lib.end());
+        auto dist = [&](int g) { return fabsf(wrap_d(library_slot(a, g) - a.carPos, nLib)); };
+        std::sort(order.begin(), order.end(), [&](int x, int y) { return dist(x) > dist(y); });
+        for (int g : order) {
+            float dd = wrap_d(library_slot(a, g) - a.carPos, nLib), ad = std::min(1.0f, fabsf(dd));
+            float scale = 1.0f - 0.30f * ad, h = H * scale;
+            float yaw = std::max(-1.0f, std::min(1.0f, dd)) * 35.0f;
+            float light = 1.0f - 0.45f * ad;
+            bool ready = a.st[g].ready == R_READY;
+            if (!ready) light *= 0.55f;
+            ImVec2 c(cx + dd * spacing, cy + (H - h) * 0.5f);
+            // a click on a side box turns to it; on the front box, plays (when ready) or opens the page
+            ImVec2 r0(c.x - h * kCoverAspect * 0.5f, c.y - h * 0.5f), r1(c.x + h * kCoverAspect * 0.5f, c.y + h * 0.5f);
+            bool hov = nav && ImGui::IsMouseHoveringRect(r0, r1) && ImGui::IsWindowHovered();
+            if (hov && ad < 0.1f) light = std::min(1.0f, light * 1.12f + 0.04f);
+            int v0 = ImGui::GetWindowDrawList()->VtxBuffer.Size;
+            draw_box(a, g, c, h, yaw, light, true);
+            // boxes not in front: see-through (Shagg 18:41), more so the further round they are
+            float alpha = 1.0f - 0.45f * ad;
+            ImDrawList *bdl = ImGui::GetWindowDrawList();
+            for (int vi = v0; alpha < 0.999f && vi < bdl->VtxBuffer.Size; vi++) {
+                ImU32 &c32 = bdl->VtxBuffer[vi].col;
+                c32 = (c32 & 0x00FFFFFF) | ((ImU32)(((c32 >> 24) & 0xFF) * alpha) << 24);
+            }
+            if (hov && ImGui::IsMouseClicked(0)) {
+                if (ad > 0.5f) turn(a, dd > 0 ? 1 : -1);
+            }
+            if (hov && ad < 0.1f && ImGui::IsMouseDoubleClicked(0) && ready) play_start(a, g);
         }
-        if (hov && ImGui::IsMouseClicked(0)) {
-            if (ad > 0.5f) turn(a, dd > 0 ? 1 : -1);
-        }
-        if (hov && ad < 0.1f && ImGui::IsMouseDoubleClicked(0) && ready) play_start(a, g);
-    }
 
-    // under the front box: what the player has, play time, then Play and Settings
-    int g = a.front;
-    const GameDef &gd = game_def(g);
-    GameState &st = a.st[g];
-    float y = cy + H * 0.5f + S(14);
-    auto centred = [&](ImFont *f, float fs, ImVec4 c, const std::string &t, float yy) {
-        ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t.c_str());
-        dl->AddText(f, fs, ImVec2(cx - ts.x * 0.5f, yy), U(c), t.c_str());
-        return ts.y;
-    };
-    y += centred(F_HEAD, FS(F_HEAD) * 1.25f, col::text, gd.name, y) + S(2);
-    std::string line;
-    switch (st.ready) {
-    case R_READY:
-        line = st.useUpdate ? std::string(gd.updateName) : "Disc version";
-        if (st.playSeconds > 0) line += "   |   " + human_duration(st.playSeconds) + " played";
-        if (st.lastPlayed > 0) line += ", " + last_played_text(st.lastPlayed);
-        // Shagg 29 Oct 18:07: an untested game version or title update (or an update made for another disc) still plays,
-        // with a warning - unless the player said that exact file works
-        if ((st.xexKnown && !st.xexMatch && !st.xexConfirmed) || (st.useUpdate && st.xexpKnown && !st.xexpMatch && !st.xexpConfirmed))
-            line += "   |   an untested version - things may not work as they should";
-        break;
-    case R_NO_COPY: line = gd.tagline; break;
-    case R_COPY_MISSING: line = "Your copy isn't where it was - is its drive connected?"; break;
-    case R_NEED_UPDATE: line = std::string("Needs ") + gd.updateName + " - add it from your console or its package file"; break;
-    case R_NO_PORT: line = "Not in this release of COGBox yet"; break;
-    }
-    y += centred(F_BODY, FS(F_BODY), st.ready == R_READY ? col::dim : col::amber, tr(line), y) + S(14);   // 0.2.0
+        // under the front box: what the player has, play time, then Play and Settings
+        int g = a.front;
+        const GameDef &gd = game_def(g);
+        GameState &st = a.st[g];
+        float y = cy + H * 0.5f + S(14);
+        auto centred = [&](ImFont *f, float fs, ImVec4 c, const std::string &t, float yy) {
+            ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t.c_str());
+            dl->AddText(f, fs, ImVec2(cx - ts.x * 0.5f, yy), U(c), t.c_str());
+            return ts.y;
+        };
+        y += centred(F_HEAD, FS(F_HEAD) * 1.25f, col::text, gd.name, y) + S(2);
+        std::string line;
+        switch (st.ready) {
+        case R_READY:
+            line = st.useUpdate ? std::string(gd.updateName) : "Disc version";
+            if (st.playSeconds > 0) line += "   |   " + human_duration(st.playSeconds) + " played";
+            if (st.lastPlayed > 0) line += ", " + last_played_text(st.lastPlayed);
+            // Shagg 29 Oct 18:07: an untested game version or title update (or an update made for another disc) still plays,
+            // with a warning - unless the player said that exact file works
+            if ((st.xexKnown && !st.xexMatch && !st.xexConfirmed) || (st.useUpdate && st.xexpKnown && !st.xexpMatch && !st.xexpConfirmed))
+                line += "   |   an untested version - things may not work as they should";
+            break;
+        case R_NO_COPY: line = gd.tagline; break;
+        case R_COPY_MISSING: line = "Your copy isn't where it was - is its drive connected?"; break;
+        case R_NEED_UPDATE: line = std::string("Needs ") + gd.updateName + " - add it from your console or its package file"; break;
+        case R_NO_PORT: line = "Not in this release of COGBox yet"; break;
+        }
+        y += centred(F_BODY, FS(F_BODY), st.ready == R_READY ? col::dim : col::amber, tr(line), y) + S(14);   // 0.2.0
 
-    float bw = T(140), bh = T(36), gap = S(14);
-    bool running = a.run.proc != nullptr, busy = a.job.state.load() == 1;
-    // the controller's choice shows only while a controller is connected; A presses it
-    bool sel0 = a.padConnected && a.frontSel == 0, sel1 = a.padConnected && a.frontSel == 1;
-    bool padA = nav && a.padConnected && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false);
-    ImGui::SetCursorScreenPos(ImVec2(cx - bw - gap * 0.5f, y));
-    if (st.ready == R_READY) {
-        // A presses the choice LB / RB made (a.frontSel); Enter plays
-        if (th_button_red(running ? "RUNNING" : "PLAY", ImVec2(bw, bh), !running && !busy, F_HEAD, sel0) ||
-            (nav && !running && !busy && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || (padA && a.frontSel == 0))))
-            play_start(a, g);
-    } else if (st.ready != R_NO_PORT) {
-        bool addHit = th_button_red(st.ready == R_NEED_UPDATE ? "ADD UPDATE" : "ADD YOUR COPY", ImVec2(bw, bh), !busy, F_HEAD, sel0) ||
-                      (nav && !busy && padA && a.frontSel == 0);
-        if (addHit) {
-            std::string p = pick_file(L"Choose your copy: a disc image (.iso), a Games on Demand file, a title update, or default.xex in a folder",
-                                      L"Xbox 360 games and updates\0*.iso;*.xex;*.*\0All files\0*.*\0");
-            if (!p.empty()) install_start(a, p, g);
+        float bw = T(140), bh = T(36), gap = S(14);
+        bool running = a.run.proc != nullptr, busy = a.job.state.load() == 1;
+        // the controller's choice shows only while a controller is connected; A presses it
+        bool sel0 = a.padConnected && a.frontSel == 0, sel1 = a.padConnected && a.frontSel == 1;
+        bool padA = nav && a.padConnected && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false);
+        ImGui::SetCursorScreenPos(ImVec2(cx - bw - gap * 0.5f, y));
+        if (st.ready == R_READY) {
+            // A presses the choice LB / RB made (a.frontSel); Enter plays
+            if (th_button_red(running ? "RUNNING" : "PLAY", ImVec2(bw, bh), !running && !busy, F_HEAD, sel0) ||
+                (nav && !running && !busy && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || (padA && a.frontSel == 0))))
+                play_start(a, g);
+        } else if (st.ready != R_NO_PORT) {
+            bool addHit = th_button_red(st.ready == R_NEED_UPDATE ? "ADD UPDATE" : "ADD YOUR COPY", ImVec2(bw, bh), !busy, F_HEAD, sel0) ||
+                          (nav && !busy && padA && a.frontSel == 0);
+            if (addHit) {
+                std::string p = pick_file(L"Choose your copy: a disc image (.iso), a Games on Demand file, a title update, or default.xex in a folder",
+                                          L"Xbox 360 games and updates\0*.iso;*.xex;*.*\0All files\0*.*\0");
+                if (!p.empty()) install_start(a, p, g);
+            }
+        } else {
+            th_button_red("PLAY", ImVec2(bw, bh), false, F_HEAD, sel0);
         }
-    } else {
-        th_button_red("PLAY", ImVec2(bw, bh), false, F_HEAD, sel0);
-    }
-    ImGui::SameLine(0, gap);
-    if (th_button("SETTINGS", ImVec2(bw, bh), st.ready != R_NO_PORT, F_HEAD, sel1) ||
-        (nav && st.ready != R_NO_PORT && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false) || (padA && a.frontSel == 1)))) {
-        a.page = g; a.zoomTo = SCR_PAGE; a.zoomStart = now; a.tab = 0; a.barSel = -1;
-    }
-    // the side buttons: add a folder instead of a file
-    if (st.ready != R_READY && st.ready != R_NO_PORT) {
-        ImGui::SetCursorScreenPos(ImVec2(cx - S(130), y + bh + S(12)));
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
-        if (ImGui::Button("...or a folder you already extracted", ImVec2(S(260), 0)) && !busy) {
-            std::string p = pick_folder(L"Choose the folder with your game's default.xex (or a Games on Demand / title update folder)");
-            if (!p.empty()) install_start(a, p, g);
+        ImGui::SameLine(0, gap);
+        if (th_button("SETTINGS", ImVec2(bw, bh), st.ready != R_NO_PORT, F_HEAD, sel1) ||
+            (nav && st.ready != R_NO_PORT && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false) || (padA && a.frontSel == 1)))) {
+            a.page = g; a.zoomTo = SCR_PAGE; a.zoomStart = now; a.tab = 0; a.barSel = -1;
         }
-        ImGui::PopStyleColor(2);
-    }
+        // the side buttons: add a folder instead of a file
+        if (st.ready != R_READY && st.ready != R_NO_PORT) {
+            ImGui::SetCursorScreenPos(ImVec2(cx - S(130), y + bh + S(12)));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
+            if (ImGui::Button("...or a folder you already extracted", ImVec2(S(260), 0)) && !busy) {
+                std::string p = pick_folder(L"Choose the folder with your game's default.xex (or a Games on Demand / title update folder)");
+                if (!p.empty()) install_start(a, p, g);
+            }
+            ImGui::PopStyleColor(2);
+        }
+        // Shagg 1 Nov: the drop tip, under the buttons (and the folder button when it shows)
+        {
+            const bool folderRow = st.ready != R_READY && st.ready != R_NO_PORT;
+            centred(F_SMALL, FS(F_SMALL), col::dim,
+                    tr("Tip: drag and drop a disc image, Games on Demand copy, title update, DLC package or game folder onto this window to add it."),
+                    y + bh + S(14) + (folderRow ? ImGui::GetFrameHeight() + S(8) : 0.0f));
+        }
+    }   // the carousel (nLib > 0)
 
     // Get box art (Y): top right
     float artW = 0;
@@ -449,13 +531,32 @@ void front_draw(App &a, ImVec2 size)
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
             ImGui::SetTooltip("Downloads each game's Xbox Marketplace box art and background from the x360db archive on GitHub\n(the one Xenia Manager uses) into the covers folder. Your own covers\\gears2.png etc. still win.");
+        // Shagg 1 Nov: ADD GAME (Back / View) under it - the carousel has no boxes for games not added yet
+        if (nLib > 0) {
+            const bool busy = a.job.state.load() == 1;
+            ImVec2 as(std::max(bs.x, F_BOLD->CalcTextSizeA(FS(F_BOLD), FLT_MAX, 0, tr("ADD GAME")).x + S(36)), bs.y);
+            ImGui::SetCursorScreenPos(ImVec2(size.x - as.x - S(24), S(22) + bs.y + S(8)));
+            if (th_button("ADD GAME", as, !busy, F_BOLD) || (nav && !busy && ImGui::IsKeyPressed(ImGuiKey_GamepadBack, false)))
+                add_game_ask(a);
+            // Shagg 1 Nov: music on / off (music.cpp), beside it - when a game in the library has a copy to read it from
+            if (music_any_source(a)) {
+                const char *ml = music_on(a) ? "MUSIC: ON" : "MUSIC: OFF";
+                ImVec2 ms(F_BOLD->CalcTextSizeA(FS(F_BOLD), FLT_MAX, 0, tr(ml)).x + S(36), bs.y);
+                ImGui::SetCursorScreenPos(ImVec2(size.x - as.x - S(24) - S(12) - ms.x, S(22) + bs.y + S(8)));
+                if (th_button(ml, ms, true, F_BOLD) || (nav && ImGui::IsKeyPressed(ImGuiKey_GamepadR3, false)) ||
+                    (!ImGui::GetIO().WantTextInput && !a.modal.open && ImGui::IsKeyPressed(ImGuiKey_M, false)))
+                    music_set_on(a, !music_on(a));
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                    ImGui::SetTooltip("%s", tr("Plays the chosen game's own menu music, read from your copy, in the library and on its settings page. M switches it."));
+            }
+        }
     }
     // a newer COGBox on GitHub: a small notice beside the box art button; it opens this game's About tab, where Update is
     // (Shagg 21:57). COGBOX_SHOW_UPDATE=<version> shows it without a release (test switch, off for players).
     {
         std::string newer = update_newer();
         if (newer.empty() && getenv("COGBOX_SHOW_UPDATE")) newer = getenv("COGBOX_SHOW_UPDATE");
-        if (!newer.empty() && st.ready != R_NO_PORT) {
+        if (!newer.empty() && a.st[a.front].ready != R_NO_PORT) {
             // 0.2.2 (Shagg): one click updates - downloads, unpacks and restarts COGBox by itself
             float prog = 0; std::string uerr;
             const int us_state = update_install_state(&prog, &uerr);
@@ -483,7 +584,7 @@ void front_draw(App &a, ImVec2 size)
     // 0.2.0 (GitHub #1): once per session, when the carousel stops on Judgment and it has no Title Update 4
     {
         static bool toldTu4 = false;
-        if (!toldTu4 && a.front == G_JUDGMENT && a.carPos == (float)game_slot(G_JUDGMENT) && a.st[G_JUDGMENT].ready == R_NEED_UPDATE &&
+        if (!toldTu4 && a.front == G_JUDGMENT && a.carPos == (float)library_slot(a, G_JUDGMENT) && a.st[G_JUDGMENT].ready == R_NEED_UPDATE &&
             !a.modal.open && a.zoomTo == SCR_FRONT) {
             toldTu4 = true;
             ask(a, "info", G_JUDGMENT, "Title Update 4 needed",
@@ -495,7 +596,7 @@ void front_draw(App &a, ImVec2 size)
     // Gears 1: its one build is made from the disc and Title Update 5 together - once per session, as Judgment's
     {
         static bool toldTu5 = false;
-        if (!toldTu5 && a.front == G_GEARS1 && a.carPos == (float)game_slot(G_GEARS1) && a.st[G_GEARS1].ready == R_NEED_UPDATE &&
+        if (!toldTu5 && a.front == G_GEARS1 && a.carPos == (float)library_slot(a, G_GEARS1) && a.st[G_GEARS1].ready == R_NEED_UPDATE &&
             !a.modal.open && a.zoomTo == SCR_FRONT) {
             toldTu5 = true;
             ask(a, "info", G_GEARS1, "Title Update 5 needed",
@@ -510,7 +611,7 @@ void front_draw(App &a, ImVec2 size)
         static bool told[G_COUNT] = {};
         for (int g : { (int)G_GEARS2, (int)G_GEARS3 }) {
             const GameState &st = a.st[g];
-            if (told[g] || a.front != g || a.carPos != (float)game_slot(g) || a.modal.open || a.zoomTo != SCR_FRONT) continue;
+            if (told[g] || a.front != g || a.carPos != (float)library_slot(a, g) || a.modal.open || a.zoomTo != SCR_FRONT) continue;
             if (st.dataDir.empty() || !st.updateDir.empty()) continue;
             if (a.ini.geti("Notices", std::string("TuRecommendNever_") + game_def(g).key, 0)) { told[g] = true; continue; }
             told[g] = true;
@@ -524,11 +625,15 @@ void front_draw(App &a, ImVec2 size)
     }
     // the hint line
     std::string padHint = std::string(tr("D-pad: choose a game")) + "      " + pad_name(a, "LB") + " / " + pad_name(a, "RB") + ": " + tr("Play or Settings") + "      " +
-                          pad_name(a, "A") + ": " + tr("press") + "      " + pad_name(a, "X") + ": " + tr("settings") + "      " + pad_name(a, "Y") + ": " + tr("box art") + "      " +
+                          pad_name(a, "A") + ": " + tr("press") + "      " + pad_name(a, "X") + ": " + tr("settings") + "      " + pad_name(a, "Y") + ": " + tr("box art") + "      " + pad_name(a, "Back") + ": " + tr("add a game") + "      " +
+                          (music_any_source(a) ? std::string(pad_name(a, "RS")) + ": " + tr("music") + "      " : std::string()) +
                           pad_name(a, "LT") + " + " + pad_name(a, "RT") + ": " + tr("fullscreen") + "      " + pad_name(a, "Start") + ": " + tr("quit");   // job 523 / 525 / 526; 0.2.0 tr
     const char *hint = a.padConnected && a.lastPad ? padHint.c_str()   // 0.2.0: the device used last
                                       : tr("Arrows / wheel: turn      Enter: play      F11: fullscreen      Esc: quit      drop a disc image or folder on the window to add it");
-    centred(F_SMALL, FS(F_SMALL), col::faint, hint, size.y - FS(F_SMALL) - S(10));
+    {
+        ImVec2 ts = F_SMALL->CalcTextSizeA(FS(F_SMALL), FLT_MAX, 0, hint);
+        dl->AddText(F_SMALL, FS(F_SMALL), ImVec2((size.x - ts.x) * 0.5f, size.y - FS(F_SMALL) - S(10)), U(col::faint), hint);
+    }
     {   // job 529 (Shagg 21:17): the maker's mark, bottom right, just above the hint line
         const char *mark = "Made by Shagg";
         ImVec2 ms = F_BOLD->CalcTextSizeA(FS(F_BOLD), FLT_MAX, 0, mark);

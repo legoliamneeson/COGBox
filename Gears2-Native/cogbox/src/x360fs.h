@@ -156,6 +156,14 @@ bool list_god(const fs::path &header, std::vector<Entry> &out, std::string &erro
 bool extract_god(const fs::path &header, const fs::path &out_dir, ProgressFn progress, CancelFlag cancel,
                  std::string &error);
 
+// ---- reading one file in place (no extraction) ---------------------------------------------------------
+
+// Part of one file inside a disc image or a Games on Demand copy (as detect() resolves them): up to 'len' bytes from
+// 'off' ('path' as disc_has_file: '/' or '\\', any case). 'file_size' (optional) gets the file's whole size. False when
+// the copy, the file or the bytes can't be read; 'out' then empty. The launcher's music reads the games' sound this way.
+bool image_read_file(const fs::path &image, const std::string &path, uint64_t off, size_t len, std::vector<uint8_t> &out,
+                     uint64_t *file_size = nullptr);
+
 // ---- SHA-1 ------------------------------------------------------------------------------------------------
 
 std::string sha1_hex(const void *data, size_t size);        // 40 lowercase hex digits
