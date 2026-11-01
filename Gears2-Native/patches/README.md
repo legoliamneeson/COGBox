@@ -27,6 +27,9 @@ Then move the third-party submodules to the tags in `sdk-pins.txt` and configure
   `src/audio/sdl` (`patch -p1`).
 - `sdk-patch52-file-open-failed-observer.diff` (GitHub #54: a failed file open is told to an observer; Judgment's
   loading-screen cap uses it) comes after patch 49b. Apply it in the SDK root (`git apply`).
+- `sdk-patch53-joystick-background-events.diff` (GitHub #108: the game's SDL input sets
+  SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, as the launcher does, and rex_app.cpp no longer zeroes the pad while
+  the window is unfocused) comes after patch 52. Apply it in the SDK root.
 - `sdk-patch15` to `sdk-patch37` are the separate patches that went into `rexglue-sdk.diff`. They're kept
   for reference only, so don't apply them again.
 - `sdk-patch16-zpd-pairing-UNBUILT.diff` was never built. It isn't in any release.
