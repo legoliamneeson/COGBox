@@ -276,6 +276,10 @@ std::vector<Option> make_options(Game g) {
              "WASD move, mouse look, left click fire, right click aim, Space cover/roll, F melee, E use, Q look at, R reload, "
              "Tab Tac/Com, 1-4 weapons, middle click / Z zoom, C left-stick click, Esc / Enter pause, Backspace back. A "
              "controller still works.", 378));
+    // GitHub #104: keep the controller's button prompts with Keyboard and mouse on (Steam Input gyro players)
+    add(make("PadPrompts", "Controller button prompts", Tab::Controls, Kind::Bool, SH, 0,
+             "With Keyboard and mouse on, keep the game's controller button prompts instead of the key caps "
+             "(for example when Steam Input sends a controller as keyboard and mouse).", 0));
     // 0.2.0 (GitHub #2): up to 20 (was 5) - the mouse drives the right stick, so slow moves sat inside the game's stick
     // dead zone at 5. True mouse look (no stick limits) is planned.
     // 0.2.1: native mouse look - the value is the multiplier on the mouse counts (Shagg 15:59: 1.0 far too fast, 0.5
@@ -504,6 +508,7 @@ Availability available(const Option& o, Game g, Version ver, const Settings& s, 
     bool on = true;
     if (o.id == "WindowSize") on = s.i("Fullscreen") == 0;                             // PS1 333: windowed only
     else if (o.id == "PaperWhite" || o.id == "Peak") on = s.b("HDR");                 // PS1 366
+    else if (o.id == "PadPrompts") on = s.b("Mnk");                                  // GitHub #104
     else if (o.id == "SceneMode") on = s.i("AAMode") >= 2 && s.i("Api") == 0;        // PS1 352, 473; job 521
     else if (o.id == "FrameGen" && s.i("Api") != 0) { a.ok = false; a.why = "DirectX 12 only."; return a; }   // job 521
     else if (o.id == "RealOcclusion" && (s.i("Api") != 0 || env.wine)) { a.ok = false; a.why = "DirectX 12 only."; return a; }   // PR #43
@@ -1054,7 +1059,7 @@ std::vector<std::string> build_args(Game g, Version ver, const Settings& s, cons
         // Job 629 (GitHub #41): keyboard button prompts - our key caps drawn over the game's controller-button sheet.
         // Job 661: drawn by the launcher at 4x for whatever keys are set (keycaps.cpp).
         // Gears 1: no known prompt sheet yet - no overlays
-        if (!isG1 && !env.prompt_dir.empty() && cap_exe(env, "gow2_texture_overlay_dir")) {
+        if (!isG1 && !s.b("PadPrompts") && !env.prompt_dir.empty() && cap_exe(env, "gow2_texture_overlay_dir")) {
             // Job 661 (Shagg 30 Oct: "make those prompts higher resolution"): the launcher draws the key caps itself, 4x the
             // sheet's size and for the player's own keys too (job 660); without it, the shipped default-key overlays.
             std::string dir;
