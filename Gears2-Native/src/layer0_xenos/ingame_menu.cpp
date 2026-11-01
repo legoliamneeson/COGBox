@@ -8,6 +8,7 @@
 // The controller is read with XInput (loaded at run time, nothing to link) on a small polling thread; while the menu is
 // open its buttons are fed to Dear ImGui's gamepad navigation. Our code (MIT).
 #include <xenos/dev_tools.h>
+#include <xenos/input/prompt_device_monitor.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
@@ -529,6 +530,9 @@ void RequestOpenOnUIThread() {
 }  // namespace
 
 void XenosInstallInGameMenu(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window, rex::Runtime* runtime) {
+  // PR #117: the button-prompt monitor (its own thread; nothing with --gow_button_prompts=original), menu or no menu.
+  ::xenos::input::GlobalPromptDeviceMonitor().Start(
+      window, runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr);
   if (!REXCVAR_GET(cogbox_menu_enabled) || !drawer || !window) return;
   g_drawer = drawer;
   g_window = window;
@@ -549,6 +553,8 @@ void XenosInstallInGameMenu(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* windo
 }
 
 void XenosShutdownInGameMenu() {
+  ::xenos::input::GlobalPromptDeviceMonitor().Stop();
+  ::xenos::input::GlobalPromptDeviceMonitor().DetachWindow(nullptr);
   AllowSetForegroundWindow(ASFW_ANY);   // 0.2.0: any other way out too (window closed, the game's own quit)
   g_stop.store(true);
   if (g_poller.joinable()) g_poller.join();

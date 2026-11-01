@@ -7,6 +7,8 @@
 #include <xenos/renderer/texture_cache.h>
 
 #include <xenos/formats.h>
+#include <xenos/input/prompt_device_monitor.h>
+#include <xenos/renderer/prompt_overlay_compositor.h>
 #include <xenos/texture_layout.h>
 
 #include <rex/cvar.h>
@@ -14,6 +16,7 @@
 #include <rex/logging/macros.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -62,17 +65,26 @@ REXCVAR_DEFINE_STRING(gow2_texture_dump_sizes, "128x128,256x256,512x512,1024x102
                       "Gears2", "Sizes --gow2_texture_dump_dir writes (WxH, comma-separated; 'all' = every size from 32x32 up)");
 
 namespace {
+std::atomic<uint64_t> g_overlay_gen{1};
+
 // Job 620: texture replacement / dump state (one TextureCache per process).
 struct TexSwap {
+  mutable std::mutex mutex;
   bool init = false;
   std::string replace_dir, dump_dir;
   std::unordered_set<uint64_t> replace;     // hashes with replacement files
-  std::unordered_map<uint64_t, std::vector<uint8_t>> overlay;  // job 629: hash -> w, h (8 bytes) + RGBA
+  std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> overlay;          // job 629: disk overlays (w, h + RGBA)
+  std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> dynamic_overlay;  // in-memory overlays
+  bool suppress_disk_prompt_overlays = false;
+  std::atomic<bool> static_on{false};  // PR117 fix: replacements / disk overlays / dumps (fixed at Init)
+  std::atomic<bool> dyn_on{false};     // PR117 fix: dynamic overlays or prompt suppression active now
+  void SyncDyn() { dyn_on.store(!dynamic_overlay.empty() || suppress_disk_prompt_overlays, std::memory_order_release); }  // under mutex
   std::unordered_set<uint32_t> dump_sizes;  // w << 16 | h
   bool dump_all = false;                    // job 628: --gow2_texture_dump_sizes=all
   std::unordered_set<uint64_t> dumped;
   uint32_t dump_count = 0, replaced = 0;
   void Init() {
+    std::lock_guard<std::mutex> lock(mutex);
     if (init) return;
     init = true;
     replace_dir = REXCVAR_GET(gow2_texture_replace_dir);
@@ -104,7 +116,7 @@ struct TexSwap {
         std::memcpy(&ow, b.data() + 8, 4);
         std::memcpy(&oh, b.data() + 12, 4);
         if (ow == 0 || oh == 0 || ow > 4096 || oh > 4096 || b.size() != 16 + size_t(ow) * oh * 4) continue;
-        overlay[h].assign(b.begin() + 8, b.end());
+        overlay[h] = std::make_shared<const std::vector<uint8_t>>(b.begin() + 8, b.end());
       }
       REXLOG_INFO("gow2_texture_overlay: {} overlay(s) in {}", overlay.size(), ov_dir);
     }
@@ -122,9 +134,24 @@ struct TexSwap {
       }
       REXLOG_INFO("gow2_texture_dump: textures of {} to {}", dump_all ? std::string("every size") : std::to_string(dump_sizes.size()) + " size(s)", dump_dir);
     }
+    static_on.store(!replace.empty() || !overlay.empty() || !dump_sizes.empty() || dump_all, std::memory_order_release);
   }
   bool Dumps(uint32_t w, uint32_t h) const { return dump_all ? (w >= 32 && h >= 32) : dump_sizes.count((w << 16) | h) != 0; }
-  bool On() const { return !replace.empty() || !overlay.empty() || !dump_sizes.empty() || dump_all; }
+  // PR117 fix: no lock on the hot path. Entries already carrying an overlay stay candidates through their own flags.
+  bool On() const { return static_on.load(std::memory_order_acquire) || dyn_on.load(std::memory_order_acquire); }
+  bool HasReplace(uint64_t h) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return replace.count(h) != 0;
+  }
+  std::shared_ptr<const std::vector<uint8_t>> FindOverlay(uint64_t h) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto dyn = dynamic_overlay.find(h);
+    if (dyn != dynamic_overlay.end()) return dyn->second;
+    if (suppress_disk_prompt_overlays && ::xenos::renderer::prompt::IsPromptAtlasOrAlias(h)) return nullptr;
+    const auto it = overlay.find(h);
+    if (it != overlay.end()) return it->second;
+    return nullptr;
+  }
   bool ReadLevel(uint64_t h, uint32_t level, std::vector<uint8_t>& out) const {
     char leaf[40];
     std::snprintf(leaf, sizeof(leaf), "%016llX_%u.bin", static_cast<unsigned long long>(h), level);
@@ -404,6 +431,90 @@ void ScaleBc3Level(const std::vector<uint8_t>& src, uint32_t lw, uint32_t lh, ui
 
 }  // namespace
 
+uint64_t ComputeRexTextureHash(uint64_t swap_hash, uint32_t w, uint32_t h, uint32_t layers, uint32_t pitch_div_32,
+                               uint32_t format, uint32_t endian, uint32_t dim, bool tiled, bool packed,
+                               uint32_t max_level, uint32_t base_extent_bytes, uint32_t mips_extent_bytes) {
+  const uint64_t rex_words[6] = {
+      swap_hash,
+      uint64_t(w) | (uint64_t(h) << 32),
+      uint64_t(layers) | (uint64_t(pitch_div_32) << 32),
+      uint64_t(format) | (uint64_t(endian) << 32),
+      uint64_t(dim) | (uint64_t(tiled ? 1u : 0u) << 32) | (uint64_t(packed ? 1u : 0u) << 33) |
+          (uint64_t(max_level) << 34),
+      uint64_t(base_extent_bytes) | (uint64_t(mips_extent_bytes) << 32),
+  };
+  return XXH3_64bits(rex_words, sizeof(rex_words));
+}
+
+void SetDynamicOverlay(uint64_t hash, std::vector<uint8_t> overlay_data) {
+  g_swap.Init();
+  {
+    std::lock_guard<std::mutex> lock(g_swap.mutex);
+    if (overlay_data.empty()) {
+      g_swap.dynamic_overlay.erase(hash);
+    } else {
+      if (overlay_data.size() >= 16 && std::memcmp(overlay_data.data(), "COGBOXOV", 8) == 0) {
+        overlay_data.erase(overlay_data.begin(), overlay_data.begin() + 8);
+      }
+      if (overlay_data.size() >= 8) {
+        uint32_t ow = 0, oh = 0;
+        std::memcpy(&ow, overlay_data.data(), 4);
+        std::memcpy(&oh, overlay_data.data() + 4, 4);
+        if (ow > 0 && oh > 0 && ow <= 4096 && oh <= 4096 && overlay_data.size() == 8 + size_t(ow) * oh * 4) {
+          g_swap.dynamic_overlay[hash] = std::make_shared<const std::vector<uint8_t>>(std::move(overlay_data));
+        }
+      }
+    }
+    g_swap.SyncDyn();
+  }
+  g_overlay_gen.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void SetDynamicOverlayShared(uint64_t hash, std::shared_ptr<const std::vector<uint8_t>> overlay_data) {
+  g_swap.Init();
+  {
+    std::lock_guard<std::mutex> lock(g_swap.mutex);
+    if (!overlay_data || overlay_data->size() < 8) {
+      g_swap.dynamic_overlay.erase(hash);
+    } else {
+      uint32_t ow = 0, oh = 0;
+      std::memcpy(&ow, overlay_data->data(), 4);
+      std::memcpy(&oh, overlay_data->data() + 4, 4);
+      if (ow > 0 && oh > 0 && ow <= 4096 && oh <= 4096 && overlay_data->size() == 8 + size_t(ow) * oh * 4) {
+        g_swap.dynamic_overlay[hash] = std::move(overlay_data);
+      }
+    }
+    g_swap.SyncDyn();
+  }
+  g_overlay_gen.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void SetSuppressDiskOverlaysForPrompts(bool suppress) {
+  g_swap.Init();
+  {
+    std::lock_guard<std::mutex> lock(g_swap.mutex);
+    if (g_swap.suppress_disk_prompt_overlays == suppress) return;
+    g_swap.suppress_disk_prompt_overlays = suppress;
+    g_swap.SyncDyn();
+  }
+  g_overlay_gen.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ClearDynamicOverlays() {
+  g_swap.Init();
+  {
+    std::lock_guard<std::mutex> lock(g_swap.mutex);
+    g_swap.dynamic_overlay.clear();
+    g_swap.suppress_disk_prompt_overlays = false;
+    g_swap.SyncDyn();
+  }
+  g_overlay_gen.fetch_add(1, std::memory_order_acq_rel);
+}
+
+uint64_t BumpOverlayGeneration() { return g_overlay_gen.fetch_add(1, std::memory_order_acq_rel) + 1; }
+
+uint64_t OverlayGeneration() { return g_overlay_gen.load(std::memory_order_acquire); }
+
 void TextureCache::ResetCounters() {
   const uint64_t textures = stats_.textures, host = stats_.host_bytes;
   const uint64_t scaled = stats_.scaled_textures, scaled_bytes = stats_.scaled_bytes;
@@ -447,6 +558,11 @@ uint32_t TextureCache::Bind(const uint32_t* fetch, uint32_t slots_2d, uint32_t s
   if (epoch != last_bind_epoch_) {  // patch 0137
     ++stats_.epoch_changes;
     last_bind_epoch_ = epoch;
+  }
+  const uint64_t ov_gen = OverlayGeneration();
+  if (ov_gen != last_bind_overlay_gen_) {
+    for (SlotCache& sc : slot_cache_) sc.valid = false;
+    last_bind_overlay_gen_ = ov_gen;
   }
   for (uint32_t k = 0; k < 32; ++k) {
     const uint32_t kinds = ((slots_2d >> k) & 1) | (((slots_cube >> k) & 1) << 1) | (((slots_3d >> k) & 1) << 2);
@@ -627,6 +743,27 @@ TextureCache::Entry& TextureCache::Lookup(const uint32_t* tf, uint32_t host_kind
   }
   Entry& e = *it->second;
   if (!e.texture) return done(e, "stand-in");
+  g_swap.Init();
+  const uint64_t ov_gen = OverlayGeneration();
+  if (e.overlay_gen != ov_gen) {
+    const uint32_t format = Bits(tf[1], 0, 6);
+    const uint32_t dim = Bits(tf[5], 9, 2);
+    const bool stacked = Bits(tf[1], 10, 1);
+    const bool overlay_candidate = e.has_overlay || e.ov_scale > 1 || !e.overlay_variants.empty() ||
+                                   e.prompt_known ||
+                                   (g_swap.On() && !e.swap_checked && host_kind == 0 && dim == 1 && !stacked && format == 20);
+    if (overlay_candidate) {
+      const uint64_t epoch_before = watch_.Epoch();
+      e.loaded_frame = frame;
+      Load(e, tf, host_kind);
+      e.checked_frame = frame;
+      e.callbacks_at_check = epoch_before;
+      if (probe_base) e.probe_load_hash = GuestHash(e);
+      if (load_log_frame_ && frame == load_log_frame_) LogLoad(e, tf, frame, "reload: overlay generation changed");
+      return done(e, "reload: overlay generation changed");
+    }
+    e.overlay_gen = ov_gen;
+  }
   // Re-check only when something was written since the last check: the watch epoch advances on every Bump, the
   // callbacks' and our own resolves' alike (upl-n107: the callback counter alone missed resolves within a frame, so a
   // texture checked earlier in the frame kept stale content - job 109's green channel).
@@ -1020,19 +1157,32 @@ void TextureCache::EndFrame(uint64_t frame) {
   uint64_t bytes = stats_.host_bytes;
   for (const auto& [used, key] : old) {
     if (bytes <= target) break;
-    bytes -= entries_.at(*key)->host_bytes;
+    bytes -= entries_.at(*key)->TotalHostBytes();
     evict.push_back(*key);
   }
   if (evict.empty()) return;
   for (const Key& k : evict) {
     auto it = entries_.find(k);
     Entry& e = *it->second;
-    backend_.DestroyTexture(e.texture);  // deferred by the backend until our GPU is past it
-    stats_.host_bytes -= e.host_bytes;
-    stats_.evicted_bytes += e.host_bytes;
-    --stats_.textures;
+    if (!e.overlay_variants.empty()) {
+      for (const auto& [_, var] : e.overlay_variants) {
+        if (!var.texture) continue;
+        backend_.DestroyTexture(var.texture);
+        stats_.host_bytes -= std::min(stats_.host_bytes, var.host_bytes);
+        stats_.evicted_bytes += var.host_bytes;
+        if (stats_.textures) --stats_.textures;
+        ++freed_total_;
+      }
+      e.overlay_variants.clear();
+      e.texture = 0;
+    } else {
+      backend_.DestroyTexture(e.texture);  // deferred by the backend until our GPU is past it
+      stats_.host_bytes -= std::min(stats_.host_bytes, e.host_bytes);
+      stats_.evicted_bytes += e.host_bytes;
+      if (stats_.textures) --stats_.textures;
+      ++freed_total_;  // patch 0149
+    }
     ++stats_.evictions;
-    ++freed_total_;  // patch 0149
     if (e.through_indexed) {
       auto [a, b] = through_.equal_range(e.through_base);
       for (auto t = a; t != b; ++t)
@@ -1124,29 +1274,99 @@ void TextureCache::Load(Entry& e, const uint32_t* tf, uint32_t host_kind) {
   const bool host_3d = host_kind == 2;
   // Job 620: replacement / dump candidates (2D, one layer; job 628: any format) are hashed and kept on the CPU path.
   g_swap.Init();
-  uint64_t swap_hash = 0;
+  const uint64_t current_ov_gen = OverlayGeneration();
+  uint64_t swap_hash = 0, rex_hash = 0, matched_hash = 0;
   bool swap_replace = false, swap_dump = false;
+  std::shared_ptr<const std::vector<uint8_t>> swap_overlay_holder;
   const std::vector<uint8_t>* swap_overlay = nullptr;  // job 629
-  if (g_swap.On() && gd == tx::Dimension::k2DOrStacked && layers == 1 && host_kind == 0) {
+  if ((g_swap.On() || e.has_overlay || e.ov_scale > 1 || !e.overlay_variants.empty()) &&
+      gd == tx::Dimension::k2DOrStacked && layers == 1 && host_kind == 0) {
     swap_hash = XXH3_64bits(guest_ + base, std::max(layout.base.level_data_extent_bytes, 1u));
-    swap_replace = g_swap.replace.count(swap_hash) != 0;
+    rex_hash = ComputeRexTextureHash(swap_hash, w, h, layers, pitch_div_32, format, endian, dim, tiled, packed,
+                                     layout.max_level, layout.base.level_data_extent_bytes,
+                                     layout.mips_total_extent_bytes);
+    if (g_swap.HasReplace(swap_hash)) {
+      swap_replace = true;
+      matched_hash = swap_hash;
+    } else if (g_swap.HasReplace(rex_hash)) {
+      swap_replace = true;
+      matched_hash = rex_hash;
+    }
     if (format == 20) {  // k_DXT4_5 -> host BC3
-      const auto ov = g_swap.overlay.find(swap_hash);
-      if (ov != g_swap.overlay.end() && ov->second.size() >= 8) {
+      swap_overlay_holder = g_swap.FindOverlay(swap_hash);
+      uint64_t ov_hash = swap_hash;
+      if (!swap_overlay_holder) {
+        swap_overlay_holder = g_swap.FindOverlay(rex_hash);
+        ov_hash = rex_hash;
+      }
+      if (swap_overlay_holder && swap_overlay_holder->size() >= 8) {
         // Job 666: only an overlay made for this size (1x, or the same whole 2-8x across and down).
         uint32_t ow = 0, oh = 0;
-        std::memcpy(&ow, ov->second.data(), 4);
-        std::memcpy(&oh, ov->second.data() + 4, 4);
+        std::memcpy(&ow, swap_overlay_holder->data(), 4);
+        std::memcpy(&oh, swap_overlay_holder->data() + 4, 4);
         const uint32_t k = w ? ow / w : 0;
-        if (k >= 1 && k <= 8 && ow == w * k && oh == h * k) swap_overlay = &ov->second;
+        if (k >= 1 && k <= 8 && ow == w * k && oh == h * k) {
+          swap_overlay = swap_overlay_holder.get();
+          matched_hash = ov_hash;
+        }
       }
     }
     swap_dump = !g_swap.dump_dir.empty() && g_swap.Dumps(w, h) && g_swap.dump_count < 4000 &&
                 g_swap.dumped.insert(swap_hash).second;
   }
-  // job 661: a host texture made bigger for an overlay always reloads on the CPU path (the GPU loads write guest size)
-  const bool swap_cpu = swap_replace || swap_dump || swap_overlay || (e.texture && e.ov_scale > 1);
+  if (swap_hash) {  // PR117 fix: remember what this content is, so a generation bump needs no rehash to skip it
+    e.swap_checked = true;
+    e.prompt_known = swap_overlay != nullptr || prompt::IsPromptAtlasOrAlias(swap_hash) || prompt::IsPromptAtlasOrAlias(rex_hash);
+  } else {  // not hashed this time (nothing on): the content may have changed, so it is unknown again
+    e.swap_checked = false;
+    e.prompt_known = false;
+  }
   const uint32_t ov_scale = swap_overlay ? OverlayScale(*swap_overlay, w, h) : 1u;  // job 661
+  const bool is_prompt_or_overlay =
+      swap_overlay != nullptr || !e.overlay_variants.empty() ||
+      (swap_hash != 0 && (prompt::IsPromptAtlasOrAlias(swap_hash) || prompt::IsPromptAtlasOrAlias(rex_hash)));
+  // job 661: a host texture made bigger for an overlay always reloads on the CPU path (the GPU loads write guest size)
+  const bool swap_cpu = swap_replace || swap_dump || swap_overlay || ov_scale > 1 || is_prompt_or_overlay;
+  const bool replacing_existing = e.texture != 0;
+  const bool cache_overlay_variants =
+      !swap_replace && format == 20 && gd == tx::Dimension::k2DOrStacked && layers == 1 && host_kind == 0 &&
+      swap_hash != 0 && is_prompt_or_overlay;
+  if (swap_hash != e.variant_swap_hash && !e.overlay_variants.empty()) {
+    // Guest memory content changed to a different texture: release any cached style variants other than e.texture.
+    for (const auto& [_, var] : e.overlay_variants) {
+      if (var.texture && var.texture != e.texture) {
+        backend_.DestroyTexture(var.texture);
+        stats_.host_bytes -= std::min(stats_.host_bytes, var.host_bytes);
+        if (stats_.textures) --stats_.textures;
+        ++freed_total_;
+      }
+    }
+    e.overlay_variants.clear();
+  }
+  if (cache_overlay_variants) {
+    e.variant_swap_hash = swap_hash;
+    if (e.overlay_gen != current_ov_gen) {
+      const auto var_it = e.overlay_variants.find(swap_overlay);
+      if (var_it != e.overlay_variants.end() && var_it->second.texture) {
+        const OverlayVariant& var = var_it->second;
+        e.texture = var.texture;
+        e.ov_scale = var.ov_scale;
+        e.host_bytes = var.host_bytes;
+        e.has_overlay = var.has_overlay;
+        e.overlay_gen = current_ov_gen;
+        for (SlotCache& sc : slot_cache_) sc.valid = false;
+        return;
+      }
+      if (!e.overlay_variants.empty()) {
+        // Keep previously uploaded style variants alive in e.overlay_variants; allocate a fresh host texture for this style.
+        e.texture = 0;
+        e.host_bytes = 0;
+        for (SlotCache& sc : slot_cache_) sc.valid = false;
+      }
+    }
+  } else {
+    e.variant_swap_hash = swap_hash;
+  }
   // GPU path: raw 2D textures (one layer) in a format with typed UAV stores (D3D11-class hardware guarantees these).
   // Takeover T3: 24:8 depth textures (shadow maps, scene depth - resolve destinations) also load on the GPU, from the
   // guest-memory mirror where our resolves put them (codes 14/15: the CPU path's kDepthUnorm / kDepthFloat).
@@ -1174,6 +1394,30 @@ void TextureCache::Load(Entry& e, const uint32_t* tf, uint32_t host_kind) {
         ((layers == 1 && host_kind == 0) || (host_kind == 1 && layers == 6))) ||
        (!hf.block_compressed && bpb == 4 && fb.block_width == 1 && fb.block_height == 1 && host_kind == 1 &&
         layers == 6 && hf.host_bytes == 4));
+  // Recreate the host texture when an existing slot changes overlay scale (e.g. 1x <-> 4x prompt atlas) or needs UAV
+  // storage it was not created with.
+  if (e.texture && (e.ov_scale != ov_scale || (gpu && !e.gpu_storage))) {
+    for (auto v = e.overlay_variants.begin(); v != e.overlay_variants.end();) {  // PR117 fix: no double destroy
+      if (v->second.texture == e.texture) v = e.overlay_variants.erase(v); else ++v;
+    }
+    backend_.DestroyTexture(e.texture);
+    e.texture = 0;
+    stats_.host_bytes -= std::min(stats_.host_bytes, e.host_bytes);
+    e.host_bytes = 0;
+    if (stats_.textures) --stats_.textures;
+    if (e.through_indexed) {
+      auto [a, b] = through_.equal_range(e.through_base);
+      for (auto t = a; t != b; ++t) {
+        if (t->second == &e) {
+          through_.erase(t);
+          break;
+        }
+      }
+      e.through_indexed = false;
+      e.through_ok = false;
+    }
+    for (SlotCache& sc : slot_cache_) sc.valid = false;
+  }
   // Host texture (created once; re-loads write into it).
   if (!e.texture) {
     gpu::TextureDesc td;
@@ -1204,7 +1448,13 @@ void TextureCache::Load(Entry& e, const uint32_t* tf, uint32_t host_kind) {
       bytes += uint64_t(std::max(td.width >> m, 1u)) * std::max(td.height >> m, 1u) * td.depth_or_layers * hf.host_bytes /
                (uint64_t(fb.block_width) * fb.block_height);
     e.host_bytes = bytes;
+    if (replacing_existing) {
+      ++stats_.textures;
+      stats_.host_bytes += e.host_bytes;
+    }
   }
+  e.overlay_gen = current_ov_gen;
+  e.has_overlay = swap_overlay != nullptr || swap_replace;
   // Watch the guest ranges before reading them, so a write during the copy bumps the version.
   e.base_start = base;
   e.base_length = std::max(layout.base.level_data_extent_bytes, 1u);
@@ -1530,6 +1780,7 @@ void TextureCache::Load(Entry& e, const uint32_t* tf, uint32_t host_kind) {
         ++g_swap.dump_count;
       }
       uint32_t up_row_bytes = row_bytes, up_rows = host_h;  // job 661: a bigger host texture gets bigger levels
+      const uint64_t active_hash = matched_hash ? matched_hash : swap_hash;
       if (e.ov_scale > 1 && hf.block_compressed && bpb == 16 && !host_3d && u == 0) {
         const uint32_t big_w = std::max((w * e.ov_scale) >> level, 1u), big_h = std::max((h * e.ov_scale) >> level, 1u);
         std::vector<uint8_t> big;
@@ -1539,16 +1790,16 @@ void TextureCache::Load(Entry& e, const uint32_t* tf, uint32_t host_kind) {
         up_rows = (big_h + 3) / 4;
         static int logged_big = 0;
         if (level == 0 && logged_big++ < 8)
-          REXLOG_INFO("gow2_texture_overlay: {:016X} ({}x{}) drawn at {}x{} - our key caps at full detail", swap_hash, w, h, big_w, big_h);
+          REXLOG_INFO("gow2_texture_overlay: {:016X} ({}x{}) drawn at {}x{} - our key caps at full detail", active_hash, w, h, big_w, big_h);
       } else if (swap_overlay && u == 0) {
-        ApplyOverlay(scratch_, *swap_overlay, level, lw, lh, row_bytes, swap_hash);  // job 629
+        ApplyOverlay(scratch_, *swap_overlay, level, lw, lh, row_bytes, active_hash);  // job 629
       }
       if (swap_replace && u == 0) {  // job 620: this level from the replacement file, when its size matches
         std::vector<uint8_t> rep;
-        if (g_swap.ReadLevel(swap_hash, level, rep) && rep.size() == scratch_.size()) {
+        if (g_swap.ReadLevel(active_hash, level, rep) && rep.size() == scratch_.size()) {
           scratch_.swap(rep);
           if (level == 0 && ++g_swap.replaced <= 20)
-            REXLOG_INFO("gow2_texture_replace: {:016X} ({}x{} format {}) replaced", swap_hash, w, h, format);
+            REXLOG_INFO("gow2_texture_replace: {:016X} ({}x{} format {}) replaced", active_hash, w, h, format);
         }
       }
       {
@@ -1558,6 +1809,10 @@ void TextureCache::Load(Entry& e, const uint32_t* tf, uint32_t host_kind) {
       }
       stats_.upload_bytes += scratch_.size();
     }
+  }
+  if (cache_overlay_variants && e.texture) {
+    e.overlay_variants[swap_overlay] =
+        OverlayVariant{e.texture, e.ov_scale, e.host_bytes, e.has_overlay, swap_overlay_holder};
   }
   g_phase.upload += cpu_upload;  // job 299
   g_phase.cpu += PhaseMs(cpu_t0) - cpu_upload;

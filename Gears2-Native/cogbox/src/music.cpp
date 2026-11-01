@@ -39,8 +39,9 @@ const TrackDef kTracks[G_COUNT] = {
     /* G_GEARS3   */ { { "GearGame/CookedXbox360/GearStart.xxx", "GearGame/CookedXbox360/GearStartTransition.xxx", nullptr }, { nullptr }, { 2, 44100, 242.7f } },
     // GearStart.xxx: 92 waves, two long (138.3 s, 128.1 s); the 138.3 s one (decoded: RMS 2692, peak 23920)
     /* G_JUDGMENT */ { { "GearGame/CookedXbox360/GearStart.xxx", "GearGame/CookedXbox360/GearStartTransition.xxx", nullptr }, { nullptr }, { 2, 32000, 138.3f } },
-    // not found yet: job 991 found no XMA record of 20 s or more in any of Gears 1's 947 packages (another layout)
-    /* G_GEARS1   */ { { "WarGame/CookedXenon/GOWMenus_FrontEnd.xxx", "WarGame/CookedXenon/Music_Score.xxx", nullptr }, { nullptr }, { 0, 0, 0 } },
+    // WarStart.xxx (the front end; the same track is in WarIntermission.xxx): little-endian XMA1, two long waves, 293.7 s
+    // and 141.8 s; the 293.7 s one is the menu theme (job 997, Shagg listened; decoded: RMS 2437, peak 22142)
+    /* G_GEARS1   */ { { "WarGame/CookedXenon/WarStart.xxx", "WarGame/CookedXenon/WarIntermission.xxx", nullptr }, { nullptr }, { 2, 44100, 293.7f } },
 };
 
 const int kRate = 44100;

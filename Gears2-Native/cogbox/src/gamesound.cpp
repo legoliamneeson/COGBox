@@ -33,6 +33,8 @@ namespace {
 
 uint32_t be32(const uint8_t *p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
 uint16_t be16(const uint8_t *p) { return uint16_t(p[0] << 8 | p[1]); }
+uint16_t le16(const uint8_t *p) { return uint16_t(p[1] << 8 | p[0]); }
+uint32_t le32(const uint8_t *p) { return uint32_t(p[3]) << 24 | uint32_t(p[2]) << 16 | uint32_t(p[1]) << 8 | p[0]; }
 
 const uint32_t kTag = 0x9E2A83C1u;
 const size_t kMaxPackage = size_t(384) << 20;   // the largest Gears package with sound is ~20 MB packed
@@ -408,7 +410,16 @@ std::vector<Wave> ue3_find_waves(const std::vector<uint8_t> &b)
             w.xma = 1;
             for (int s = 0; s < be16(f + 8); s++) w.channels += f[12 + s * 20 + 17];
             w.rate = int(be32(f + 12 + 4));
-            w.samples = 0;
+            const uint32_t bps = be32(f + 12);   // the first stream's bytes per second: the length (XMA1 states none)
+            w.samples = bps ? uint32_t(uint64_t(ds) * uint32_t(w.rate) / bps) : 0;
+        } else if (le16(f) == 0x165 && le16(f + 8) >= 1 && le16(f + 8) <= 8 && cs == 12u + 20u * le16(f + 8)) {
+            // Gears 1 (2006, job 994): the same UE3 sizes (big-endian), but the XMAWAVEFORMAT little-endian, as in a RIFF file
+            w.xma = 1;
+            w.le = true;
+            for (int s = 0; s < le16(f + 8); s++) w.channels += f[12 + s * 20 + 17];
+            w.rate = int(le32(f + 12 + 4));
+            const uint32_t bps = le32(f + 12);
+            w.samples = bps ? uint32_t(uint64_t(ds) * uint32_t(w.rate) / bps) : 0;
         } else continue;
         if (w.channels < 1 || w.channels > 8 || w.rate < 8000 || w.rate > 96000) continue;
         if (!w.samples) w.samples = uint32_t(uint64_t(ds / 2048) * 2048 * 8 / 2 / std::max(1, w.channels) / 3);   // rough (XMA1 gives none)
@@ -468,7 +479,7 @@ bool xma_decode(const std::vector<uint8_t> &b, const Wave &w, std::vector<int16_
     if (w.xma == 1) {
         id = AV_CODEC_ID_XMA1;
         ex.assign(f + 4, f + cs);
-        ex[4] = uint8_t(be16(f + 8)); ex[5] = 0;
+        ex[4] = uint8_t(w.le ? le16(f + 8) : be16(f + 8)); ex[5] = 0;
     } else if (cs == 0x34) {
         ex.assign(34, 0);
         const uint8_t *e = f + 0x12;
